@@ -46,8 +46,10 @@ class ParentCalendar {
       const row=document.createElement('div');row.className='calendar-session';const name=document.createElement('strong');name.textContent=record.session_name;
       const badge=document.createElement('span');badge.className=`status-badge ${record.status}`;badge.textContent=({present:'Present',absent:'Absent',pending:'Not seen yet'})[record.status];
       const detail=document.createElement('p');detail.className='message';const time=value=>new Date(value).toLocaleTimeString(undefined,{timeZone:this.zone,hour:'2-digit',minute:'2-digit'});
-      detail.textContent=`Started ${time(record.started_at)} · ${record.session_status==='active'?'In progress':'Ended'} · ${record.method==='manual'?'Staff correction':record.first_seen_at?'Camera check-in '+time(record.first_seen_at):'No camera check-in recorded'}`;
-      row.append(name,badge,detail);holder.append(row);
+      detail.textContent=`Started ${time(record.started_at)} · ${record.session_status==='active'?'In progress':'Ended'} · ${record.checked_in_at?'Check-in '+time(record.checked_in_at)+(record.checked_out_at?' · Check-out '+time(record.checked_out_at):' · No check-out recorded'):record.method==='manual'?'Staff correction':'No check-in recorded'}`;
+      row.append(name,badge,detail);
+      for(const movement of record.movements || []){const item=document.createElement('p');item.className='message';item.textContent=`${movement.action.replaceAll('_',' ')} · ${time(movement.occurred_at)} · ${movement.source==='staff'?'Staff recorded':movement.source==='automatic'?'Direction scan':'Camera scan'}`;row.append(item);}
+      holder.append(row);
     }
   }
 }

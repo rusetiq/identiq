@@ -1,7 +1,7 @@
 "use strict";
 class FaceTracker {
-  constructor({video,canvas,request,capture,onUpdate,pause=()=>false}) {
-    Object.assign(this,{video,canvas,request,capture,onUpdate,pause});
+  constructor({video,canvas,request,capture,onUpdate,pause=()=>false,guide=()=>null}) {
+    Object.assign(this,{video,canvas,request,capture,onUpdate,pause,guide});
     this.generation=0;this.running=false;this.analysis=null;this.readyStreak=0;this.lastSample=0;
     this.box=null;this.matched=false;this.highlights=[];
   }
@@ -51,6 +51,13 @@ class FaceTracker {
     const width=Math.round(canvas.clientWidth*devicePixelRatio),height=Math.round(canvas.clientHeight*devicePixelRatio);
     if(canvas.width!==width || canvas.height!==height) {canvas.width=width;canvas.height=height;}
     const ctx=canvas.getContext('2d');ctx.clearRect(0,0,width,height);
+    const guide=this.guide();
+    if(guide){
+      ctx.save();ctx.strokeStyle='rgba(255,255,255,.8)';ctx.lineWidth=2*devicePixelRatio;ctx.setLineDash([8*devicePixelRatio,8*devicePixelRatio]);ctx.beginPath();
+      if(guide.axis==='x'){ctx.moveTo(width/2,0);ctx.lineTo(width/2,height);}else{ctx.moveTo(0,height/2);ctx.lineTo(width,height/2);}ctx.stroke();ctx.setLineDash([]);
+      const labels=guide.axis==='x'?(guide.direction==='positive'?'CHECK IN →   /   ← CHECK OUT':'← CHECK IN   /   CHECK OUT →'):(guide.direction==='positive'?'CHECK IN ↓   /   ↑ CHECK OUT':'↑ CHECK IN   /   CHECK OUT ↓');
+      ctx.font=`600 ${16*devicePixelRatio}px -apple-system, sans-serif`;const size=ctx.measureText(labels).width+24*devicePixelRatio;ctx.fillStyle='rgba(12,18,25,.9)';ctx.fillRect((width-size)/2,12*devicePixelRatio,size,34*devicePixelRatio);ctx.fillStyle='#fff';ctx.fillText(labels,(width-size)/2+12*devicePixelRatio,35*devicePixelRatio);ctx.restore();
+    }
     const scale=Math.min(width/video.videoWidth,height/video.videoHeight),ox=(width-video.videoWidth*scale)/2,oy=(height-video.videoHeight*scale)/2;
     const point=p=>[ox+(1-p.x)*video.videoWidth*scale,oy+p.y*video.videoHeight*scale];
     const data=this.analysis && performance.now()-this.analysis.time<1800 ? this.analysis.data : null;

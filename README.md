@@ -18,15 +18,17 @@ The first run creates `.venv`, installs the Python dependencies, and downloads a
 
 1. Enable your camera. Use even lighting and keep faces large enough to see clearly. Enrollment requires one person; attendance supports up to eight together.
 2. Select **Enroll → Laptop camera**, enter their name, and confirm their permission. Click **Capture & enroll**. Hold still for the first samples and gently turn your head for the later ones.
-3. Select **Attendance**, name the session and click **Start session**. Everyone enrolled at that moment starts as **Not seen yet**.
-4. Click **Start attendance scan**. Up to eight people can check in together. One successful match for each identity marks them **Present**; repeated sightings update their last-seen time without adding duplicate rows. They stay present after leaving the camera view.
-5. Click **End session → End & save**. People still not seen become **Absent**. Review saved sessions using **Session history**, correct any missed scan with a person's status menu, and download **Export CSV**.
+3. Set student IDs and classes using **Student details** in the directory. Select **Attendance**, name the school day, choose all students or one class and click **Start session**. The roster saves its student details at that moment.
+4. Choose **Automatic walking direction**, **Camera check-in** or **Camera check-out**, then start the scan. Automatic mode requires an enrolled face to cross the visible center line; configure the line and check-in direction using the mirrored preview. Camera modes record a movement on one successful match. Up to eight enrolled faces are handled together. Disappearing from view does not record a departure.
+5. Use a student’s **Check in / Check out** buttons for staff-recorded movements with a required note. Check-out requires a recorded arrival; repeated arrivals or departures do not duplicate events. Re-entry is supported, and the movement history keeps previous visits. **End session → End & save** marks pending students absent and flags check-ins without departure; it does not fabricate check-out times. Review history, correct attendance and export timestamps, campus state, student ID and class as CSV.
 
 An active session survives a page reload or server restart; enable the camera and restart scanning to continue it. New enrollments join the next session. Manual corrections are preserved during later scans; choose **Not seen yet** in an active session to let the camera mark that person again. Absent means no check-in was recorded during the session, not proof that someone was physically absent.
 
 The **Recognize** tab still retrieves names or verifies a selected identity without changing attendance. **Pause attendance scan** stops matching. **Turn off camera** releases the camera. **Remove** deletes that person's enrollment and face patterns; saved attendance retains their name and status.
 
 If access was denied, enable camera permission for localhost in your browser's site settings. On macOS, check **System Settings → Privacy & Security → Camera** for that browser. If the camera is busy, close another app using it.
+
+Use **Delete all attendance** beside Export CSV in the staff Attendance section to clear every session and attendance record, including attendance stored in local database backups. Confirm in the dialog. Enrolled people, face patterns and parent access stay intact. The button is disabled when attendance history is empty.
 
 ## Parent portal
 
@@ -84,3 +86,9 @@ If your environment was created with `uv`, use `uv pip install --python .venv/bi
 - [SFace model and license](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface)
 
 `scripts/download_models.py` verifies downloaded files against the official model Git LFS SHA-256 checksums. YuNet's model is distributed under the MIT license; SFace's model is distributed under the Apache 2.0 license. License copies are included in `models/`. The models remain the work of their respective authors.
+
+## School movement workflow
+
+The parent portal shows the latest arrival/departure, student ID/class and movement history on its calendar. It exposes only the linked student and omits staff notes. Attendance remains Present after departure. Legacy Present records migrate to “location not recorded” because old camera sightings cannot establish arrival or departure.
+
+Automatic direction tracking uses enrolled identities and normalized face centers across a dead zone around the center line. It resets after a missed or uncertain recognition or a 1.5-second gap. The camera must clearly see the same enrolled face on both sides; fast passages, turns and missed frames may need a staff correction. Arrival/departure and source are recorded for each movement, and changing modes pauses the scan. This is a tested local workflow, not a validated physical gate or release authorization. Real school deployment still needs individual staff accounts, encrypted storage, backups/retention policies and validated liveness/accuracy testing.

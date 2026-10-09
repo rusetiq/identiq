@@ -161,3 +161,40 @@ def test_closed_records_load_after_app_restart(setup,image):
     restarted.post('/api/staff/login',json={'code':code},headers={'X-Portal-Request':'1'})
     result=restarted.get(f'/api/attendance/sessions/{sid}').json['session']
     assert result['status']=='closed' and result['counts']['absent']==1
+
+
+def test_staff_clear_all_requires_confirmation_preserves_access_and_clears_backups(setup,image):
+    import sqlite3
+    from contextlib import closing
+    from test_parent_portal import link,parent_client
+    client,headers,_,database=setup
+    person=enroll(client,headers,image).json['person']
+    created=link(client,headers,person['id']).json['parent']
+    parent=parent_client(client,created['access_code'])
+    first=start(client,headers).json['session']['id']
+    client.post(f'/api/attendance/sessions/{first}/finish',json={},headers=headers)
+    second=start(client,headers).json['session']['id']
+    scanner=str(uuid.uuid4());recognize(client,headers,image,second,scanner)
+    access=client.application.extensions['portal_access'];store=access.store
+    folder=database.parent/'backups';folder.mkdir()
+    with store.connect() as source,closing(sqlite3.connect(folder/'test.sqlite3')) as backup:source.backup(backup)
+    attendance=client.application.extensions['attendance'];assert attendance.sightings
+    assert client.application.test_client().delete('/api/attendance/sessions',json={'confirmed':True},headers=headers).status_code==401
+    assert parent.delete('/api/attendance/sessions',json={'confirmed':True},headers=headers).status_code==401
+    assert client.delete('/api/attendance/sessions',json={'confirmed':True}).status_code==403
+    for payload in [{},{'confirmed':False},{'confirmed':'true'}]:
+        assert client.delete('/api/attendance/sessions',json=payload,headers=headers).status_code==422
+    assert len(attendance.sessions())==2
+    result=client.delete('/api/attendance/sessions',json={'confirmed':True},headers=headers)
+    assert result.status_code==200 and result.json=={'deleted':True,'sessions_deleted':2,'records_deleted':2,'backups_cleared':1}
+    assert attendance.sessions()==[] and not attendance.sightings
+    assert parent.get('/api/parent/attendance?month=2026-10').json['history']==[]
+    for path in (database,folder/'test.sqlite3'):
+        with closing(sqlite3.connect(path)) as db:
+            assert db.execute('SELECT count(*) FROM attendance_records').fetchone()[0]==0
+            assert db.execute('SELECT count(*) FROM attendance_sessions').fetchone()[0]==0
+            assert db.execute('SELECT count(*) FROM people').fetchone()[0]==1
+            assert db.execute('SELECT count(*) FROM embeddings').fetchone()[0]==5
+            assert db.execute('SELECT count(*) FROM parent_access').fetchone()[0]==1
+    assert start(client,headers).json['session']['id']>second
+    assert recognize(client,headers,image,second,scanner).json['code']=='session_missing'

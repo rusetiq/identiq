@@ -85,6 +85,11 @@ def create_app(database=None, engine=None):
     def status():
         return jsonify(models_ready=models_ready(), people=len(store.people()), threshold=THRESHOLD, samples=SAMPLES)
 
+    @app.patch('/api/people/<int:person_id>/profile')
+    def student_profile(person_id):
+        data=payload()
+        return jsonify(person=store.update_student_profile(person_id,data.get('student_id',''),data.get('class_name','')))
+
     @app.get("/api/people")
     def people():
         return jsonify(people=store.people())
@@ -200,7 +205,7 @@ def create_app(database=None, engine=None):
             if session_id is not None:
                 attendance.reset(session_id, scanner_id)
             raise
-        tracking = attendance.observe(session_id, scanner_id, recognition) if session_id is not None else None
+        tracking = attendance.observe(session_id, scanner_id, {**recognition,'box':box}, action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive')) if session_id is not None else None
         return jsonify(**recognition, box=box, threshold=THRESHOLD, attendance=tracking)
 
     @app.post('/api/recognize/group')
@@ -230,7 +235,7 @@ def create_app(database=None, engine=None):
                     face['status'] = 'ambiguous'
                     face['message'] = 'Multiple faces match the same enrollment. No attendance marked for those faces.'
             if session_id is not None:
-                updates = attendance.observe_group(session_id, scanner_id, faces)
+                updates = attendance.observe_group(session_id, scanner_id, faces, data.get('attendance_action','check_in'),data.get('crossing_axis','x'),data.get('entry_direction','positive'))
                 for face, update in zip(faces, updates):
                     face['attendance'] = update
             return jsonify(**{**result, 'faces':faces}, threshold=THRESHOLD)
@@ -262,7 +267,12 @@ def create_app(database=None, engine=None):
 
     @app.post("/api/attendance/sessions")
     def start_attendance():
-        return jsonify(session=attendance.start(payload().get("name"))), 201
+        return jsonify(session=attendance.start(payload().get("name"),payload().get("class_name",""))), 201
+
+    @app.post('/api/attendance/sessions/<int:session_id>/records/<int:record_id>/movement')
+    def manual_movement(session_id,record_id):
+        data=payload()
+        return jsonify(movement=attendance.manual_movement(session_id,record_id,data.get('action'),data.get('note')))
 
     @app.get("/api/attendance/sessions/<int:session_id>")
     def attendance_detail(session_id):

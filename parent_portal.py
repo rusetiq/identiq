@@ -130,22 +130,35 @@ class PortalAccess:
             end = datetime(year+1,1,1,tzinfo=zone) if number==12 else datetime(year,number+1,1,tzinfo=zone)
             bounds = [value.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z') for value in (start,end)]
         with self.store.connect() as db:
-            parent = db.execute('''SELECT a.name,p.id,p.name AS student_name FROM parent_access a
+            parent = db.execute('''SELECT a.name,p.id,p.name AS student_name,p.student_id,p.class_name FROM parent_access a
                 JOIN people p ON p.id=a.person_id WHERE a.id=? AND a.revoked_at IS NULL''', (parent_id,)).fetchone()
             if parent is None:
                 raise FaceError('parent_missing', 'This parent access is no longer available.')
             records = [dict(row) for row in db.execute('''SELECT s.name AS session_name,s.started_at,s.ended_at,s.status AS session_status,
-                r.status,r.first_seen_at,r.last_seen_at,r.method FROM attendance_records r
+                r.id AS record_id,r.status,r.first_seen_at,r.last_seen_at,r.method,r.checked_in_at,r.checked_out_at,r.campus_state FROM attendance_records r
                 JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? ORDER BY s.id DESC LIMIT 100''', (parent['id'],))]
             calendar = [dict(row) for row in db.execute("""SELECT s.name AS session_name,s.started_at,s.ended_at,s.status AS session_status,
-                r.status,r.first_seen_at,r.last_seen_at,r.method FROM attendance_records r
+                r.id AS record_id,r.status,r.first_seen_at,r.last_seen_at,r.method,r.checked_in_at,r.checked_out_at,r.campus_state FROM attendance_records r
                 JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? AND s.started_at>=? AND s.started_at<?
                 ORDER BY s.started_at,s.id""", (parent['id'],*bounds))] if month is not None else None
+            selected_records=records+(calendar or [])
+            ids=list({record['record_id'] for record in selected_records})
+            movement_rows=[]
+            for offset in range(0,len(ids),400):
+                chunk=ids[offset:offset+400];placeholders=','.join('?' for _ in chunk)
+                movement_rows.extend(dict(row) for row in db.execute(f"""SELECT m.id,m.record_id,m.action,m.source,m.occurred_at FROM attendance_movements m JOIN attendance_records r ON r.id=m.record_id
+                    WHERE r.person_id=? AND m.record_id IN ({placeholders}) ORDER BY m.id""",(parent['id'],*chunk)))
+            movements={record_id:[] for record_id in ids}
+            for movement in movement_rows:
+                if movement['record_id'] in movements:movements[movement['record_id']].append(movement)
+            for record in selected_records:record['movements']=movements.get(record['record_id'],[])
             active = db.execute("SELECT id FROM attendance_sessions WHERE status='active'").fetchone()
             active_record = db.execute('''SELECT s.name AS session_name,s.started_at,s.ended_at,s.status AS session_status,
-                r.status,r.first_seen_at,r.last_seen_at,r.method FROM attendance_records r
+                r.id AS record_id,r.status,r.first_seen_at,r.last_seen_at,r.method,r.checked_in_at,r.checked_out_at,r.campus_state FROM attendance_records r
                 JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? AND s.status='active' ''', (parent['id'],)).fetchone()
-        result = {'parent_name': parent['name'], 'student_name': parent['student_name'], 'current': dict(active_record) if active_record else None,
+        current=dict(active_record) if active_record else None
+        if current:current['movements']=movements.get(current['record_id'],[])
+        result = {'parent_name': parent['name'], 'student_name': parent['student_name'],'student_id':parent['student_id'],'class_name':parent['class_name'], 'current': current,
                 'active_session': bool(active), 'history': records, 'timezone':attendance_timezone}
         if month is not None: result.update(calendar=calendar,calendar_month=month)
         return result

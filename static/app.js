@@ -1,12 +1,12 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="local-token"]').content;
-const state = { stream: null, mode: "attendance", scanning: false, enrolling: false, ready: false, people: [], activeAttendance: null, viewedAttendance: null, attendanceBusy: false, scanSessionId: null, phoneCapture: null, streak: 0, candidate: null, generation: 0, cameraGeneration: 0, cameraStarting: false, scanAbort: null, attendanceSessionCount: 0 };
+const state = { stream: null, mode: "attendance", scanning: false, enrolling: false, ready: false, people: [], activeAttendance: null, viewedAttendance: null, attendanceBusy: false, scanSessionId: null, phoneCapture: null, streak: 0, candidate: null, generation: 0, cameraGeneration: 0, cameraStarting: false, scanAbort: null, attendanceSessionCount: 0, movementMode:"automatic" };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let toastTimer;
 const captureCanvas=document.createElement('canvas');
 const liveTracker = new FaceTracker({video: $("video"), canvas: $("overlay"), capture: frame,
-  request: image => api("/api/analyze", "POST", {image,group:state.mode==='attendance' || state.mode==='verify' && !$("person-select").value}), onUpdate: updateControls, pause:()=>document.hidden || state.scanning && (state.scanSessionId || !$("person-select").value)});
+  request: image => api("/api/analyze", "POST", {image,group:state.mode==='attendance' || state.mode==='verify' && !$("person-select").value}), onUpdate: updateControls, guide:()=>state.mode==="attendance" && state.activeAttendance && state.movementMode==="automatic" ? {axis:$("crossing-axis").value,direction:$("entry-direction").value} : null, pause:()=>document.hidden || state.scanning && (state.scanSessionId || !$("person-select").value)});
 let cancelEnrollment = false;
 const recentCheckIns=new Map();
 
@@ -34,10 +34,15 @@ async function api(path, method = "GET", data, signal) {
 }
 
 function updateControls() {
+  $("attendance-flow").disabled=$("fullscreen-flow").disabled=state.enrolling || state.attendanceBusy;
+  $("fullscreen-flow").value=$("attendance-flow").value=state.movementMode;
+  $("direction-settings").hidden=state.movementMode!=="automatic";
+  $("movement-instructions").textContent=state.movementMode==="automatic" ? "Cross the line in the check-in direction to arrive, and the opposite direction to depart. Disappearing from the camera does not check a student out." : state.movementMode==="check_out" ? "Exit camera mode: recognized students with a recorded arrival are checked out." : "Entry camera mode: one successful match records check-in.";
+  document.querySelectorAll('#attendance-roster button').forEach(button=>button.disabled=state.attendanceBusy || button.dataset.unavailable==='true');
   $("delete-attendance").disabled=state.attendanceBusy || state.enrolling || !state.attendanceSessionCount;
   $("fullscreen-scan").hidden=state.mode!=="attendance" || !state.activeAttendance;
   $("fullscreen-scan").disabled=state.attendanceBusy || state.enrolling || !state.stream || !state.ready;
-  $("fullscreen-scan").textContent=state.scanning && state.scanSessionId ? "Pause attendance scan" : "Start attendance scan";
+  $("fullscreen-scan").textContent=state.scanning && state.scanSessionId ? "Pause attendance scan" : "Start movement scan";
   document.querySelectorAll("#attendance-roster select").forEach(select=>{select.disabled=state.attendanceBusy || state.enrolling;});
   $("start-session").disabled = state.attendanceBusy || state.enrolling || !!state.activeAttendance || !state.people.length;
   $("session-name").disabled = state.attendanceBusy || !!state.activeAttendance;
@@ -131,7 +136,7 @@ function stopScan() {
   state.streak = 0;
   state.candidate = null;
   $("recognize").textContent = "Start recognition";
-  $("attendance-scan").textContent = "Start attendance scan";
+  $("attendance-scan").textContent = "Start movement scan";
   $("feed-label").textContent = "LIVE PREVIEW";
   clearBox();updateControls();
   $("scan-face-results").replaceChildren();$("scan-face-results").hidden=true;
@@ -172,6 +177,10 @@ async function refreshPeople() {
   state.people = (await api("/api/people")).people;
   document.dispatchEvent(new CustomEvent('people-refreshed',{detail:state.people}));
   $("people-count").textContent = state.people.length;
+  const chosenClass=$('session-class').value;
+  $('session-class').replaceChildren(new Option('All enrolled students',''));
+  for(const name of [...new Set(state.people.map(p=>p.class_name).filter(Boolean))].sort()) $('session-class').add(new Option(name,name));
+  $('session-class').value=chosenClass;
   const phoneTarget = $("iphone-target").value;
   $("iphone-target").replaceChildren(new Option("New person from capture file", ""));
   state.people.forEach(person => $("iphone-target").add(new Option(person.name, person.id)));
@@ -194,10 +203,12 @@ async function refreshPeople() {
     const meta = document.createElement("p");
     meta.textContent = `ID ${String(person.id).padStart(3,"0")} · ${person.samples} samples${person.iphone_samples ? " · iPhone added" : ""} · Added ${new Date(person.created_at).toLocaleDateString(undefined,{month:"short",day:"numeric"})}`;
     info.append(name,meta);
+    const school=document.createElement('p');school.textContent=[person.student_id && `Student ID: ${person.student_id}`,person.class_name].filter(Boolean).join(' · ');info.append(school);
+    const edit=document.createElement('button');edit.className='text-button';edit.textContent='Student details';edit.setAttribute('aria-label',`Student details for ${person.name}`);edit.onclick=()=>openStudentProfile(person);
     const status = document.createElement("span");status.className = "person-status";status.innerHTML = '<span class="green-dot"></span> ENROLLED';
     const remove = document.createElement("button");remove.className = "text-button";remove.textContent = "Remove";remove.setAttribute("aria-label",`Remove ${person.name}`);
     remove.onclick = () => askDelete(person);
-    row.append(avatar,info,status,remove);$("people-list").append(row);
+    row.append(avatar,info,status,edit,remove);$("people-list").append(row);
   }
   updateControls();
 }
@@ -219,7 +230,7 @@ async function scan(attendanceSessionId = null) {
     try {
       const selected = $("person-select").value;
       const capturedAt=performance.now(),image=frame();
-      const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {attendance_session_id: attendanceSessionId, scanner_id: scannerId} : {}) }, scanAbort.signal);
+      const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {attendance_session_id: attendanceSessionId, scanner_id: scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value} : {}) }, scanAbort.signal);
       if (!state.scanning || generation !== state.generation) break;
       if(group) {liveTracker.accept(data,image,capturedAt);await showGroupResults(data,groupStreaks,attendanceSessionId);continue;}
       if (data.status === "matched") {
@@ -262,11 +273,11 @@ async function showGroupResults(data,streaks,sessionId) {
     let name=`Face ${index+1}`,detail=face.message || 'No attendance marked.',matched=false;
     if(face.status==='matched') {
       name=face.person.name;streaks.set(face.person.id,(streaks.get(face.person.id) || 0)+1);
-      matched=sessionId ? (face.attendance.status==='present' || face.attendance.status==='manual_override' && face.attendance.attendance_status==='present') : streaks.get(face.person.id)>=3;
-      if(matched) {confirmed++;detail=sessionId ? face.attendance.status==='manual_override' ? 'Present · staff correction' : 'Present for this session' : 'Recognized';}
+      matched=sessionId ? ['present','checked_out'].includes(face.attendance.status) || face.attendance.campus_state==='on_campus' && face.attendance.status==='tracking' : streaks.get(face.person.id)>=3;
+      if(matched) {confirmed++;detail=sessionId ? face.attendance.status==='manual_override' ? 'Present · staff correction' : face.attendance.campus_state==='checked_out' ? 'Checked out' : 'Checked in' : 'Recognized';}
       else if(!sessionId || face.attendance.status==='confirming') {confirming++;detail=`${sessionId ? face.attendance.confirmations : streaks.get(face.person.id)} of ${sessionId ? 1 : 3} consecutive matches`;}
       else detail=face.attendance.status==='manual_override' ? `Staff marked ${face.attendance.attendance_status}. Camera status kept unchanged.` : face.attendance.message;
-      if(face.attendance?.newly_present) newlyPresent.push(name);
+      if(face.attendance?.newly_moved || face.attendance?.newly_present) newlyPresent.push(`${name} ${face.attendance.action==='check_out' ? 'checked out' : 'checked in'}`);
     } else if(face.status==='ambiguous') name='Uncertain match';
     const row=document.createElement('div');row.className=`scan-face-row ${matched?'confirmed':face.status==='matched'?'confirming':'warning'}`;
     const title=document.createElement('strong');title.textContent=name;const text=document.createElement('span');text.textContent=detail;
@@ -277,8 +288,8 @@ async function showGroupResults(data,streaks,sessionId) {
   showCameraNames(Array.from(holder.children).map(row=>({id:row.dataset.personId,name:row.querySelector("strong").textContent,detail:row.querySelector("span").textContent,matched:row.classList.contains("confirmed")})),sessionId);
   liveTracker.highlightGroup(highlights);
   const visible=holder.children.length;
-  result(visible?`${confirmed} ${sessionId?'present':'recognized'}`:'Ready for the next person',visible?`${confirming} confirming · ${visible-confirmed-confirming} need review`:'Enrolled people are checked as they pass the camera.',confirmed?'matched':'');
-  if(newlyPresent.length) {toast(`${newlyPresent.join(', ')} marked present.`);refreshAttendance(sessionId).catch(error=>toast(error.message));}
+  result(visible?`${confirmed} ${sessionId?'movement records':'recognized'}`:'Ready for the next person',visible?`${confirming} confirming · ${visible-confirmed-confirming} need review`:state.movementMode==='automatic' ? 'Waiting for an enrolled person to cross the line.' : 'Waiting for an enrolled person.',confirmed?'matched':'');
+  if(newlyPresent.length) {toast(newlyPresent.join(', '));refreshAttendance(sessionId).catch(error=>toast(error.message));}
   // Requests remain sequential; attendance resumes shortly after each response.
   await sleep(sessionId ? 40 : 650);
 }
@@ -350,7 +361,7 @@ function showCameraNames(people,sessionId=null) {
     for(const [id,item] of recentCheckIns) if(now-item.time>3000)recentCheckIns.delete(id);
     for(const person of people)if(person.matched)recentCheckIns.set(person.id,{...person,time:now});
     const current=new Set(people.map(person=>person.id));
-    people=[...people,...Array.from(recentCheckIns.values()).filter(person=>!current.has(person.id)).map(person=>({...person,detail:'Checked in'}))];
+    people=[...people,...Array.from(recentCheckIns.values()).filter(person=>!current.has(person.id)).map(person=>({...person,detail:person.detail}))];
   }
   const holder=$("camera-names");holder.replaceChildren();holder.hidden=!people.length;
   for(const person of people){const badge=document.createElement('div');badge.className=`camera-name ${person.matched?'confirmed':'review'}`;const name=document.createElement('strong'),detail=document.createElement('span');name.textContent=person.name;detail.textContent=person.detail;badge.append(name,detail);holder.append(badge);}
@@ -487,7 +498,9 @@ async function refreshAttendance(preferredId = null) {
   if (!$('session-name').value) $('session-name').value = `Attendance ${new Date().toLocaleDateString()}`;
   $('attendance-counts').hidden = $('roster-note').hidden = $('export-attendance').hidden = !detail;
   $('attendance-session-state').textContent = detail ? detail.status === 'active' ? 'IN PROGRESS' : 'ENDED' : '';
-  $('roster-tools').hidden=!detail;
+  $('roster-tools').hidden=$('campus-counts').hidden=$('movement-log').hidden=!detail;
+  if(detail){$('count-on-campus').textContent=detail.movement_counts.on_campus;$('count-checked-out').textContent=detail.movement_counts.checked_out;$('count-location-unknown').textContent=detail.movement_counts.unknown;}
+  renderMovementLog(detail);
   renderRoster(detail);
   updateControls();
 }
@@ -500,26 +513,29 @@ function renderRoster(detail=state.viewedAttendance){
     for (const status of ['present','pending','absent']) $(`count-${status}`).textContent = detail.counts[status];
     $('export-attendance').href = `/api/attendance/sessions/${detail.id}/export.csv`;
     const table = document.createElement('table');table.className='attendance-table';table.setAttribute('aria-label','Attendance roster');
-    const head = document.createElement('thead');head.innerHTML='<tr><th>Person</th><th>Status</th><th>First seen</th><th>Last seen</th></tr>';table.append(head);
+    const head = document.createElement('thead');head.innerHTML='<tr><th>Person</th><th>Status</th><th>Check-in</th><th>Check-out</th><th>Campus record</th><th>Staff action</th></tr>';table.append(head);
     const body = document.createElement('tbody');
     const query=$('roster-search').value.trim().toLocaleLowerCase(),filter=$('roster-filter').value;
-    const visible=detail.roster.filter(person=>(!query || person.name.toLocaleLowerCase().includes(query)) && (!filter || person.status===filter));
+    const visible=detail.roster.filter(person=>(!query || [person.name,person.student_id,person.class_name].join(' ').toLocaleLowerCase().includes(query)) && (!filter || person.status===filter));
     $('roster-matches').textContent=`${visible.length} of ${detail.roster.length} people`;
     for (const person of visible) {
       const row = document.createElement('tr');row.dataset.recordId = person.id;
       const name = document.createElement('td');name.textContent = person.name;
-      const source = document.createElement('span');source.className='attendance-source';source.textContent=person.method === 'manual' ? 'Manual correction' : person.method === 'camera' ? 'Camera check-in' : person.person_id === null ? 'Enrollment removed' : '';
-      name.append(source);
+      const source = document.createElement('span');source.className='attendance-source';source.textContent=person.method === 'manual' ? 'Staff recorded' : person.method === 'camera' ? 'Camera check-in' : person.person_id === null ? 'Enrollment removed' : '';
+      const school=document.createElement('span');school.className='attendance-source';school.textContent=[person.student_id,person.class_name].filter(Boolean).join(' · ');name.append(school,source);
       const status = document.createElement('td');const select = document.createElement('select');select.className=person.status;select.setAttribute('aria-label',`Attendance for ${person.name}`);
       for (const [value,label] of [['present','Present'],['absent','Absent'],...(detail.status === 'active' ? [['pending','Not seen yet']] : [])]) select.add(new Option(label,value));
       select.value=person.status;select.onchange=()=>correctAttendance(detail.id,person.id,select.value);
       status.append(select);
       const seen = timestamp=>timestamp ? new Date(timestamp).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
-      const first=document.createElement('td');first.className='attendance-time';first.textContent=seen(person.first_seen_at);
-      const last=document.createElement('td');last.className='attendance-time';last.textContent=seen(person.last_seen_at);
-      row.append(name,status,first,last);body.append(row);
+      const first=document.createElement('td');first.className='attendance-time';first.textContent=seen(person.checked_in_at);
+      const last=document.createElement('td');last.className='attendance-time';last.textContent=seen(person.checked_out_at);
+      const campus=document.createElement('td');campus.textContent=({on_campus:'Checked in',checked_out:'Checked out',unknown:'Not recorded',not_arrived:'Not arrived'})[person.campus_state];
+      const actions=document.createElement('td');actions.className='movement-actions';
+      for(const [action,label] of [['check_in','Check in'],['check_out','Check out']]){const button=document.createElement('button');button.className='text-button';button.textContent=label;button.setAttribute('aria-label',`${label} ${person.name}`);button.dataset.unavailable=String(detail.status!=='active' || (action==='check_in'?person.campus_state==='on_campus':person.campus_state!=='on_campus'));button.disabled=button.dataset.unavailable==='true';button.onclick=()=>askStaffMovement(detail,person,action);actions.append(button);}
+      row.append(name,status,first,last,campus,actions);body.append(row);
     }
-    if(!visible.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=4;cell.textContent='No people match your filters.';row.append(cell);body.append(row);}
+    if(!visible.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=6;cell.textContent='No people match your filters.';row.append(cell);body.append(row);}
     table.append(body);$('attendance-roster').append(table);
   }
   updateControls();
@@ -532,7 +548,7 @@ $('session-form').onsubmit = async event => {
   if (state.attendanceBusy || state.activeAttendance) return;
   state.attendanceBusy=true;updateControls();
   try {
-    const started=(await api('/api/attendance/sessions','POST',{name:$('session-name').value.trim()})).session;
+    const started=(await api('/api/attendance/sessions','POST',{name:$('session-name').value.trim(),class_name:$('session-class').value})).session;
     await refreshAttendance(started.id);
     result('Attendance started',state.stream ? 'Start attendance scan to mark people present.' : 'Enable the camera, then start attendance scan.');
     toast(`${started.name} started.`);
@@ -563,7 +579,7 @@ $('end-session').onclick=async()=>{
     await refreshAttendance(state.activeAttendance.id);
     const current=state.viewedAttendance;
     if (!current || current.status !== 'active') return;
-    $('end-session-description').textContent=`End “${current.name}”? ${current.counts.present} present. ${current.counts.pending} not seen yet will be marked Absent. You can correct the saved record afterwards.`;
+    $('end-session-description').textContent=`End “${current.name}”? ${current.counts.present} present. ${current.counts.pending} not seen yet will be marked Absent. You can correct the saved record afterwards. ${current.movement_counts.on_campus} check-ins have no departure recorded. Ending the session will not create check-outs.`;
     $('end-session-dialog').showModal();
   }catch(error){toast(error.message);}
 };
@@ -601,3 +617,25 @@ $('confirm-delete-attendance').onclick=async()=>{
   finally{state.attendanceBusy=false;$('confirm-delete-attendance').disabled=false;$('cancel-delete-attendance').disabled=false;updateControls();}
 };
 $('delete-attendance-dialog').addEventListener('cancel',event=>{if(state.attendanceBusy)event.preventDefault();});
+
+function setMovementMode(mode){stopScan();recentCheckIns.clear();state.movementMode=mode;updateControls();liveTracker.render();result('Movement mode changed','Start the scan when the entry/exit direction is correct.');}
+$('attendance-flow').onchange=event=>setMovementMode(event.target.value);
+$('fullscreen-flow').onchange=event=>setMovementMode(event.target.value);
+for(const id of ['crossing-axis','entry-direction'])$(id).onchange=()=>{
+  stopScan();if(id==='crossing-axis'){const vertical=$('crossing-axis').value==='y';$('entry-direction').options[0].textContent=vertical?'Top → bottom':'Left → right';$('entry-direction').options[1].textContent=vertical?'Bottom → top':'Right → left';}liveTracker.render();
+};
+function renderMovementLog(detail){
+  const holder=$('movement-log');holder.replaceChildren();if(!detail)return;
+  const heading=document.createElement('h3');heading.textContent='Movement history';holder.append(heading);
+  if(!detail.movements.length){const empty=document.createElement('p');empty.className='message';empty.textContent='No arrivals or departures recorded yet.';holder.append(empty);return;}
+  for(const event of detail.movements){const row=document.createElement('p');row.className='movement-log-row';const name=document.createElement('strong');name.textContent=event.name;const text=document.createElement('span');text.textContent=`${event.action.replaceAll('_',' ')} · ${event.source} · ${new Date(event.occurred_at).toLocaleString()}${event.note?' · '+event.note:''}`;row.append(name,text);holder.append(row);}
+}
+let staffMovement=null;
+function askStaffMovement(session,person,action){stopScan();staffMovement={session:session.id,record:person.id,action};$('staff-movement-heading').textContent=action==='check_out'?'Record check-out':'Record check-in';$('staff-movement-description').textContent=`${person.name} · ${session.name}. Verify the movement before saving.`;$('staff-movement-note').value='';$('staff-movement-error').hidden=true;$('staff-movement-dialog').showModal();}
+$('cancel-staff-movement').onclick=()=>$('staff-movement-dialog').close();
+$('staff-movement-form').onsubmit=async event=>{
+  event.preventDefault();if(!staffMovement || state.attendanceBusy)return;state.attendanceBusy=true;$('confirm-staff-movement').disabled=true;updateControls();
+  try{await api(`/api/attendance/sessions/${staffMovement.session}/records/${staffMovement.record}/movement`,'POST',{action:staffMovement.action,note:$('staff-movement-note').value.trim()});await refreshAttendance(staffMovement.session);$('staff-movement-dialog').close();toast('Student movement recorded.');}
+  catch(error){$('staff-movement-error').textContent=error.message;$('staff-movement-error').hidden=false;}
+  finally{state.attendanceBusy=false;$('confirm-staff-movement').disabled=false;updateControls();}
+};

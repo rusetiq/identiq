@@ -192,6 +192,31 @@ class Store:
                     UNIQUE(session_id, person_id)
                 );
             """)
+            people_columns={row['name'] for row in db.execute('PRAGMA table_info(people)')}
+            for column in ('student_id','class_name'):
+                if column not in people_columns:db.execute(f"ALTER TABLE people ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS school_student_id ON people(student_id COLLATE NOCASE) WHERE student_id<>''")
+            session_columns={row['name'] for row in db.execute('PRAGMA table_info(attendance_sessions)')}
+            if 'class_name' not in session_columns:db.execute("ALTER TABLE attendance_sessions ADD COLUMN class_name TEXT NOT NULL DEFAULT ''")
+            attendance_columns={row['name'] for row in db.execute('PRAGMA table_info(attendance_records)')}
+            for column in ('student_id','class_name'):
+                if column not in attendance_columns:db.execute(f"ALTER TABLE attendance_records ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            for column in ('checked_in_at','checked_out_at'):
+                if column not in attendance_columns: db.execute(f'ALTER TABLE attendance_records ADD COLUMN {column} TEXT')
+            if 'campus_state' not in attendance_columns:
+                db.execute("ALTER TABLE attendance_records ADD COLUMN campus_state TEXT NOT NULL DEFAULT 'not_arrived' CHECK(campus_state IN ('not_arrived','on_campus','checked_out','unknown'))")
+                db.execute("UPDATE attendance_records SET campus_state='unknown' WHERE status='present'")
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS attendance_movements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL REFERENCES attendance_records(id) ON DELETE CASCADE,
+                    action TEXT NOT NULL CHECK(action IN ('check_in','check_out','correction')),
+                    source TEXT NOT NULL CHECK(source IN ('camera','automatic','staff')),
+                    occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    note TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS movements_record ON attendance_movements(record_id,id);
+            """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(embeddings)")}
             if "source" not in columns:
                 db.execute("ALTER TABLE embeddings ADD COLUMN source TEXT NOT NULL DEFAULT 'laptop'")
@@ -224,6 +249,17 @@ class Store:
                     sum(e.source='iphone_truedepth') AS iphone_samples FROM people p
                 JOIN embeddings e ON p.id=e.person_id GROUP BY p.id ORDER BY p.id DESC
             """)]
+
+    def update_student_profile(self, person_id, student_id, class_name):
+        for value in (student_id,class_name):
+            if not isinstance(value,str) or len(value)>80 or any(ord(c)<32 for c in value):
+                raise FaceError('invalid_profile','Use student IDs and class names up to 80 characters.')
+        with self.lock,self.connect() as db:
+            if db.execute('SELECT id FROM people WHERE id=?',(person_id,)).fetchone() is None:
+                raise FaceError('person_missing','That student enrollment was not found.')
+            try:db.execute('UPDATE people SET student_id=?,class_name=? WHERE id=?',(student_id.strip(),class_name.strip(),person_id))
+            except sqlite3.IntegrityError as error:raise FaceError('duplicate_student_id','That student ID is already assigned.') from error
+        return next(person for person in self.people() if person['id']==person_id)
 
     def candidates_batch(self, embeddings):
         """One version-checked snapshot and one matrix multiplication for a frame."""
