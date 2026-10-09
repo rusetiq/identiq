@@ -1,0 +1,25 @@
+// !$*UTF8*$!
+{ archiveVersion = 1; classes = {}; objectVersion = 56; objects = {
+00000000000000000000000A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentiqCaptureApp.swift; sourceTree = "<group>"; };
+000000000000000000000014 = {isa = PBXBuildFile; fileRef = 00000000000000000000000A; };
+00000000000000000000000B = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+000000000000000000000015 = {isa = PBXBuildFile; fileRef = 00000000000000000000000B; };
+00000000000000000000000C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureController.swift; sourceTree = "<group>"; };
+000000000000000000000016 = {isa = PBXBuildFile; fileRef = 00000000000000000000000C; };
+000000000000000000000001 = {isa = PBXProject; attributes = {LastUpgradeCheck = 1600; }; buildConfigurationList = 000000000000000000000006; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; knownRegions = (en, Base); mainGroup = 000000000000000000000002; productRefGroup = 000000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (000000000000000000000005); };
+000000000000000000000002 = {isa = PBXGroup; children = (000000000000000000000003, 000000000000000000000004); sourceTree = "<group>"; };
+000000000000000000000003 = {isa = PBXGroup; children = (00000000000000000000000A, 00000000000000000000000B, 00000000000000000000000C, 00000000000000000000000D); path = IdentiqCapture; sourceTree = "<group>"; };
+000000000000000000000004 = {isa = PBXGroup; children = (00000000000000000000000E); name = Products; sourceTree = "<group>"; };
+00000000000000000000000D = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+00000000000000000000000E = {isa = PBXFileReference; explicitFileType = wrapper.application; path = IdentiqCapture.app; sourceTree = BUILT_PRODUCTS_DIR; };
+000000000000000000000005 = {isa = PBXNativeTarget; buildConfigurationList = 000000000000000000000007; buildPhases = (000000000000000000000008, 000000000000000000000009, 00000000000000000000000F); buildRules = (); dependencies = (); name = IdentiqCapture; productName = IdentiqCapture; productReference = 00000000000000000000000E; productType = "com.apple.product-type.application"; };
+000000000000000000000008 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000014, 000000000000000000000015, 000000000000000000000016); runOnlyForDeploymentPostprocessing = 0; };
+000000000000000000000009 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+00000000000000000000000F = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+000000000000000000000006 = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000010, 000000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+000000000000000000000007 = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000012, 000000000000000000000013); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+000000000000000000000010 = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0;}; name = Debug; };
+000000000000000000000011 = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0;}; name = Release; };
+000000000000000000000012 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = IdentiqCapture/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = local.identiq.capture; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; SWIFT_OPTIMIZATION_LEVEL = "-Onone";}; name = Debug; };
+000000000000000000000013 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = IdentiqCapture/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = local.identiq.capture; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; SWIFT_OPTIMIZATION_LEVEL = "-O";}; name = Release; };
+}; rootObject = 000000000000000000000001; }

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="local-token" content="{{ token }}"><meta name="theme-color" content="#fafafa">
+  <title>Identiq · Attendance</title><link rel="icon" href="data:,">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script defer src="{{ url_for('static', filename='live-face.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='parent-admin.js') }}"></script>
+</head>
+<body>
+<main>
+  <header><a href="/" class="brand">Identiq</a><nav class="header-links"><a href="/parents" class="text-button">Parent portal</a><button id="staff-logout" class="text-button">Staff sign out</button><span class="local"><span class="green-dot"></span> On this laptop</span></nav></header>
+  <h1>Face attendance</h1><p class="subtitle">Start a session. Scan each enrolled person to mark them present.</p>
+  <div class="workspace">
+    <section class="camera-card" id="camera-card" aria-label="Camera preview">
+      <div class="camera-heading"><span><span class="green-dot off" id="camera-dot"></span> <span id="camera-label">CAMERA OFF</span></span><div class="camera-actions"><button id="fullscreen-scan" class="button button-primary" hidden disabled>Start attendance scan</button><button id="camera-fullscreen" class="text-button" aria-pressed="false">Fullscreen camera</button><button id="stop-camera" class="text-button" disabled>Turn off camera</button></div></div>
+      <div class="viewfinder" id="viewfinder">
+        <video id="video" autoplay muted playsinline aria-label="Live laptop camera"></video><canvas id="overlay" aria-hidden="true"></canvas>
+        <div class="camera-empty" id="camera-empty"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="3" y="6" width="14" height="12" rx="3"/><path d="m17 10 4-2v8l-4-2"/></svg><p>Your camera is off</p><button class="button button-primary" id="start-camera">Enable camera</button></div>
+        <div id="camera-names" class="camera-names" aria-label="Recognized people" hidden></div>
+        <div class="feed"><span id="feed-label">LIVE PREVIEW</span><span id="feed-resolution">— × —</span></div>
+      </div>
+      <div class="tracking-status" id="tracking-status" aria-live="polite"><span class="tracking-dot"></span><strong id="tracking-title">Camera off</strong><span id="tracking-detail">Enable camera to see live facial landmarks.</span></div>
+      <div class="tracking-metrics" id="tracking-metrics" hidden><span id="face-metric"></span><span id="clarity-metric"></span><label><input id="show-mesh" type="checkbox" checked> Facial landmarks</label></div>
+      <p id="camera-hint" class="camera-hint">Up to 8 faces together. Walk past with your face visible to the camera.</p>
+    </section>
+    <section class="controls">
+      <div class="mode-tabs" role="tablist" aria-label="Camera mode"><button id="attendance-tab" role="tab" aria-selected="true" class="tab active">Attendance</button><button id="verify-tab" role="tab" aria-selected="false" class="tab">Recognize</button><button id="enroll-tab" role="tab" aria-selected="false" class="tab">Enroll</button></div>
+      <div id="attendance-panel">
+        <form id="session-form"><label for="session-name">Session name</label><input id="session-name" maxlength="80" placeholder="e.g. Morning attendance" required><button id="start-session" class="button button-primary full" type="submit" disabled>Start session</button></form>
+        <div id="active-session" hidden><div class="session-heading"><span class="green-dot"></span><strong id="active-session-name"></strong><span>In progress</span></div><p class="instructions">Scan up to 8 people together. One successful match checks each enrolled person in as they pass. Keep faces visible to the camera.</p><button id="attendance-scan" class="button button-primary full" disabled>Start attendance scan</button><button id="end-session" class="text-button end-session">End session</button></div>
+        <div class="result" id="attendance-result" aria-live="polite"><span id="attendance-result-icon" aria-hidden="true">⌁</span><div><strong id="attendance-result-title">Ready to take attendance</strong><p id="attendance-result-detail">Enroll people, then start a session.</p></div></div>
+        <p class="message" id="attendance-note">People not seen become Absent when you end the session. You can correct missed scans.</p>
+      </div>
+      <div id="verify-panel" hidden>
+        <label for="person-select">Who to recognize</label><select id="person-select"><option value="">Anyone enrolled</option></select>
+        <button class="button button-primary full" id="recognize" disabled>Start recognition</button>
+        <div class="result" id="result" aria-live="polite"><span id="result-icon" aria-hidden="true">⌁</span><div><strong id="result-title">Ready when you are</strong><p id="result-detail">Enable your camera to begin.</p></div></div>
+        <details class="technical"><summary>Match details</summary><div class="score-row" id="score-row" hidden><span>Cosine similarity</span><strong id="score-value">—</strong></div><p>Three consecutive matches confirm the name. This is not a liveness check.</p></details>
+      </div>
+      <div id="enroll-panel" hidden>
+        <div class="source-switch" aria-label="Enrollment source"><button id="laptop-source" class="selected" aria-pressed="true">Laptop camera</button><button id="iphone-source" aria-pressed="false">iPhone scan</button></div>
+        <div id="laptop-enroll"><form id="enroll-form"><label for="person-name">Name</label><input id="person-name" name="name" maxlength="80" placeholder="Full name" autocomplete="name" required>
+          <label class="consent"><input type="checkbox" id="consent" required><span>I have permission to save this person’s face pattern.</span></label>
+          <div class="samples" aria-label="Five enrollment samples"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span></div>
+          <button class="button button-primary full" id="capture" type="submit" disabled>Capture & enroll</button><button class="text-button cancel-capture" id="cancel-capture" type="button" hidden>Cancel capture</button></form>
+          <p class="message" id="enroll-message" aria-live="polite">Enable your camera to take five samples.</p>
+        </div>
+        <div id="iphone-enroll" hidden><p class="instructions">Capture five poses in the Identiq iPhone app. AirDrop the capture file here, then import it.</p>
+          <form id="iphone-form"><label for="iphone-file">iPhone capture file</label><input type="file" id="iphone-file" accept=".json,application/json" required><p id="iphone-file-detail" class="message">Uses the front TrueDepth camera.</p>
+            <label for="iphone-target">Save to</label><select id="iphone-target"><option value="">New person from capture file</option></select>
+            <label class="consent"><input type="checkbox" id="iphone-consent" required><span>I have permission to import and save these face patterns.</span></label>
+            <button class="button button-primary full" id="import-iphone" type="submit" disabled>Import enrollment</button></form>
+          <p class="message" id="iphone-message" aria-live="polite">You can also add phone samples to someone already enrolled.</p>
+          <details class="technical"><summary>About iPhone scans</summary><p>Requires the native Identiq capture app on a TrueDepth iPhone. Safari cannot capture this depth stream. Depth helps check capture quality; recognition still uses the face photos. Improved accuracy and anti-spoofing have not been established.</p></details>
+        </div>
+      </div>
+      <div id="scan-face-results" class="scan-face-results" aria-label="Face scan results" hidden></div>
+    </section>
+  </div>
+  <section class="attendance-section" id="attendance-section"><div class="section-heading"><h2>Attendance <span id="attendance-session-state"></span></h2><div class="attendance-actions"><a id="export-attendance" class="text-button" hidden download>Export CSV</a><button id="delete-attendance" class="text-button destructive-text" disabled>Delete all attendance</button></div></div>
+    <label for="session-history" class="history-label">Session history</label><select id="session-history"><option value="">No sessions yet</option></select>
+    <div class="attendance-counts" id="attendance-counts" hidden><span><strong id="count-present">0</strong> Present</span><span><strong id="count-pending">0</strong> Not seen yet</span><span><strong id="count-absent">0</strong> Absent</span></div>
+    <div class="roster-tools" id="roster-tools" hidden><div><label for="roster-search">Find a student</label><input id="roster-search" type="search" placeholder="Search by name" autocomplete="off"></div><div><label for="roster-filter">Attendance status</label><select id="roster-filter"><option value="">All statuses</option><option value="present">Present</option><option value="pending">Not seen yet</option><option value="absent">Absent</option></select></div><span id="roster-matches" role="status"></span></div>
+    <div class="attendance-roster" id="attendance-roster"><p class="directory-empty">Start a session to see the attendance roster.</p></div>
+    <p class="message" id="roster-note" hidden>Use each status menu to correct attendance. Absent means no check-in was recorded during the session.</p>
+  </section>
+  <section class="people-section" id="people-section"><div class="section-heading"><h2>People <span id="people-count">0</span></h2><button class="text-button" id="add-person">Add person</button></div><div id="people-list" class="people-list"></div></section>
+  <section class="parent-management"><div class="section-heading"><h2>Parent access</h2><a href="/parents" class="text-button">Open parent portal</a></div><p class="message">Link a verified parent or guardian to one enrolled student. Share their code privately. Access is read-only.</p><form id="parent-link-form" class="parent-link-form"><div><label for="guardian-name">Parent or guardian name</label><input id="guardian-name" maxlength="80" required placeholder="Full name"></div><div><label for="guardian-student">Student</label><select id="guardian-student" required><option value="">Choose a student</option></select></div><button id="create-parent-link" class="button button-primary">Create access code</button></form><p id="parent-admin-error" class="message error" role="alert" hidden></p><div id="parent-code-result" class="parent-code-result" hidden><strong id="parent-code-heading"></strong><label for="new-parent-code">Private parent access code</label><input id="new-parent-code" readonly autocomplete="off"><p class="message">Shown once. Save it and share it with this guardian. They sign in at the Parent portal. Revoke access below if the code is lost or shared.</p><button id="dismiss-parent-code" class="text-button">Hide code</button></div><div id="parent-link-list" class="people-list"></div></section>
+  <footer>Names and face patterns stay on this laptop. Photos are not saved by the laptop app.<br><span>Prototype · Photos can match. No verified liveness detection.</span></footer>
+</main>
+<div class="toast" id="toast" role="status" hidden></div>
+<dialog id="delete-dialog"><h2>Remove this person?</h2><p id="delete-description"></p><div class="dialog-actions"><button id="cancel-delete" class="button secondary">Cancel</button><button id="confirm-delete" class="button danger">Remove person</button></div></dialog>
+<dialog id="end-session-dialog"><h2>End attendance?</h2><p id="end-session-description"></p><div class="dialog-actions"><button id="cancel-end-session" class="button secondary">Keep scanning</button><button id="confirm-end-session" class="button button-primary">End & save</button></div></dialog>
+<dialog id="delete-attendance-dialog" aria-labelledby="delete-attendance-heading"><h2 id="delete-attendance-heading">Delete all attendance?</h2><p>This permanently deletes every saved session, attendance record and attendance in local database backups. Any active attendance session will end. Enrolled people, face patterns and parent access will be kept.</p><p class="message error" id="delete-attendance-error" role="alert" hidden></p><div class="dialog-actions"><button id="cancel-delete-attendance" class="button secondary">Cancel</button><button id="confirm-delete-attendance" class="button danger">Delete all attendance</button></div></dialog>
+</body>
+</html>
