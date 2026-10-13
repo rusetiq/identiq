@@ -61,9 +61,9 @@ class FaceEngine:
         self.recognizer = cv2.FaceRecognizerSF.create(
             str(model_dir / "face_recognition_sface_2021dec.onnx"), "")
 
-    def _detect(self, image):
+    def _detect_at_size(self, image, max_side):
         height, width = image.shape[:2]
-        scale = min(1.0, 640 / max(width, height))
+        scale = min(1.0, max_side / max(width, height))
         detector_image = cv2.resize(image, (round(width * scale), round(height * scale))) if scale < 1 else image
         self.detector.setInputSize((detector_image.shape[1], detector_image.shape[0]))
         _, faces = self.detector.detect(detector_image)
@@ -73,7 +73,29 @@ class FaceEngine:
         faces[:, :14] /= scale
         return faces
 
-    def _quality(self, image, face):
+    def _detect(self, image, max_side=640, far=False):
+        faces=self._detect_at_size(image,max_side)
+        # A second, larger pass preserves small facial features without upscaling
+        # beyond the pixels actually supplied by the device camera.
+        if far and max(image.shape[:2])>max_side and (not len(faces) or np.min(faces[:,2:4])<128):
+            detailed=self._detect_at_size(image,1280)
+            if len(detailed):
+                candidates=np.concatenate([detailed,faces])
+                kept=[]
+                for face in sorted(candidates,key=lambda f:float(f[14]),reverse=True):
+                    duplicate=False
+                    for existing in kept:
+                        left,top=max(face[0],existing[0]),max(face[1],existing[1])
+                        right,bottom=min(face[0]+face[2],existing[0]+existing[2]),min(face[1]+face[3],existing[1]+existing[3])
+                        intersection=max(0,right-left)*max(0,bottom-top)
+                        union=face[2]*face[3]+existing[2]*existing[3]-intersection
+                        if union>0 and intersection/union>.45:
+                            duplicate=True;break
+                    if not duplicate:kept.append(face)
+                faces=np.asarray(kept,dtype=np.float32)
+        return faces
+
+    def _quality(self, image, face, minimum_fraction=.10):
         height, width = image.shape[:2]
         x, y, w, h = face[:4]
         crop = image[max(0, int(y)):min(height, int(y+h)), max(0, int(x)):min(width, int(x+w))]
@@ -88,7 +110,7 @@ class FaceEngine:
         quality = {"face_size_px": round(float(min(w, h))), "sharpness": round(sharpness, 1),
                    "brightness": round(brightness, 1), "detection_score": round(float(face[14]), 3)}
         details = {"face_count": 1, "box": [float(x / width), float(y / height), float(w / width), float(h / height)], "landmarks": anchors, "quality": quality}
-        if min(w, h) < 64 or min(w / width, h / height) < 0.10:
+        if min(w, h) < 64 or min(w / width, h / height) < minimum_fraction:
             return {**details, "status": "adjust", "code": "too_small", "message": "Face detected. Move closer so your face fills more of the frame."}, face
         if crop.size == 0 or sharpness < 6:
             return {**details, "status": "adjust", "code": "blurry", "message": "Face detected, but details are very soft. Hold still and check camera focus."}, face
@@ -107,13 +129,15 @@ class FaceEngine:
         return self._quality(image, faces[0])
 
     def _group(self, image, extract=False):
-        detected = self._detect(image)
+        detected = self._detect(image,max_side=960,far=True)
         if len(detected) > MAX_FACES:
             return {"status": "adjust", "code": "too_many_faces", "face_count": len(detected), "faces": [],
                     "message": f"Up to {MAX_FACES} faces can be scanned together. Split into smaller groups."}
         faces = []
         for face in detected:
-            analysis, _ = self._quality(image, face)
+            # Attendance can recognize a small, clear face in a wide scene;
+            # enrollment still requires a face that fills enough of the frame.
+            analysis, _ = self._quality(image, face,minimum_fraction=0)
             if extract and analysis['status'] == 'ready':
                 aligned = self.recognizer.alignCrop(image, face)
                 analysis['embedding'] = normalize(self.recognizer.feature(aligned).copy())

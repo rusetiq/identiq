@@ -63,6 +63,7 @@ function updateControls() {
   $("laptop-source").disabled = $("iphone-source").disabled = state.enrolling;
   $("iphone-file").disabled = $("iphone-target").disabled = $("iphone-consent").disabled = state.enrolling;
   $("import-iphone").disabled = state.enrolling || !state.ready || !state.phoneCapture;
+  window.sharedRoom?.renderControls();
 }
 
 function result(title, detail, kind = "", score = null) {
@@ -91,11 +92,13 @@ function frame() {
   const video = $("video");
   if (!state.stream || !video.videoWidth || video.readyState < 2) throw new Error("The camera is not ready yet.");
   const canvas = captureCanvas;
-  const ratio = Math.min(1, 960 / video.videoWidth, 960 / video.videoHeight);
+  const limit=state.mode==='attendance' || state.mode==='verify' && !$("person-select").value ? 1600 : 960;
+  const ratio = Math.min(1, limit / video.videoWidth, limit / video.videoHeight);
   const width=Math.round(video.videoWidth*ratio),height=Math.round(video.videoHeight*ratio);
   if(canvas.width!==width || canvas.height!==height){canvas.width=width;canvas.height=height;}
   canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/jpeg", .9);
+  const image=canvas.toDataURL("image/jpeg", .88);
+  return image.length>1900000 ? canvas.toDataURL("image/jpeg", .70) : image;
 }
 
 async function startCamera() {
@@ -103,8 +106,8 @@ async function startCamera() {
   state.cameraStarting=true;const cameraGeneration=++state.cameraGeneration;
   $("camera-label").textContent="CONNECTING";updateControls();
   try {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error("Use this app at http://localhost:8080 in a browser with camera support.");
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: "user", width: { ideal: 960 }, height: { ideal: 720 } } });
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera capture requires localhost or HTTPS. Open http://localhost:8080 on the laptop to share its camera.");
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 15 } } });
     if(cameraGeneration!==state.cameraGeneration){stream.getTracks().forEach(track=>track.stop());return;}
     state.stream=stream;$("video").srcObject = stream;
     await $("video").play();
@@ -140,9 +143,11 @@ function stopScan() {
   $("feed-label").textContent = "LIVE PREVIEW";
   clearBox();updateControls();
   $("scan-face-results").replaceChildren();$("scan-face-results").hidden=true;
+  window.sharedRoom?.localStopped();
 }
 
 function stopCamera() {
+  window.sharedRoom?.release();
   state.cameraGeneration++;state.cameraStarting=false;
   cancelEnrollment = true;
   liveTracker.stop();
@@ -163,6 +168,7 @@ function stopCamera() {
 function setMode(mode) {
   if (state.enrolling) return;
   stopScan();state.mode = mode;liveTracker.invalidate();
+  if(mode!=="attendance")window.sharedRoom?.release();
   for (const current of ["attendance", "verify", "enroll"]) {
     $(`${current}-panel`).hidden = current !== mode;
     $(`${current}-tab`).classList.toggle("active", current === mode);
@@ -213,12 +219,14 @@ async function refreshPeople() {
   updateControls();
 }
 
-async function scan(attendanceSessionId = null) {
+async function scan(attendanceSessionId = null, sharedExecution = false) {
+  if(attendanceSessionId && !sharedExecution && window.sharedRoom)return window.sharedRoom.toggleScan();
   if (state.scanning) { const attendanceScan = !!state.scanSessionId; stopScan();result(attendanceScan ? "Attendance scan paused" : "Recognition paused", "Start again when you’re ready.");return; }
   state.scanning = true;
   const scanAbort=new AbortController();state.scanAbort=scanAbort;
   state.scanSessionId = attendanceSessionId;
-  const scannerId = crypto.randomUUID();
+  const scannerId = sharedExecution ? window.sharedRoom.snapshot.scanner_id : crypto.randomUUID();
+  const sharedContext = sharedExecution ? window.sharedRoom.scanContext() : {};
   const group = !!attendanceSessionId || !$("person-select").value;
   const groupStreaks = new Map();
   const generation = ++state.generation;
@@ -230,7 +238,7 @@ async function scan(attendanceSessionId = null) {
     try {
       const selected = $("person-select").value;
       const capturedAt=performance.now(),image=frame();
-      const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {attendance_session_id: attendanceSessionId, scanner_id: scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value} : {}) }, scanAbort.signal);
+      const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {...sharedContext,attendance_session_id: attendanceSessionId, scanner_id: scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value} : {}) }, scanAbort.signal);
       if (!state.scanning || generation !== state.generation) break;
       if(group) {liveTracker.accept(data,image,capturedAt);await showGroupResults(data,groupStreaks,attendanceSessionId);continue;}
       if (data.status === "matched") {
@@ -254,6 +262,7 @@ async function scan(attendanceSessionId = null) {
       }
     } catch (error) {
       if (!state.scanning || generation !== state.generation) break;
+      if(error.code==='shared_scan_stopped'){stopScan();result("Shared scan paused","Shared controls paused or changed the scan.");break;}
       state.streak = 0;state.candidate = null;clearBox();
       groupStreaks.clear();showCameraNames([]);$("scan-face-results").replaceChildren();$("scan-face-results").hidden=true;
       result("Adjust your camera view",error.message,"warning");
@@ -366,19 +375,39 @@ function showCameraNames(people,sessionId=null) {
   const holder=$("camera-names");holder.replaceChildren();holder.hidden=!people.length;
   for(const person of people){const badge=document.createElement('div');badge.className=`camera-name ${person.matched?'confirmed':'review'}`;const name=document.createElement('strong'),detail=document.createElement('span');name.textContent=person.name;detail.textContent=person.detail;badge.append(name,detail);holder.append(badge);}
 }
-function closeCameraFullscreen(){
-  document.querySelectorAll('main > :not(.workspace), .workspace > .controls').forEach(element=>element.inert=false);
-  $("camera-card").classList.remove('camera-expanded');document.body.classList.remove('camera-expanded-open');
-  $("camera-fullscreen").textContent='Fullscreen camera';$("camera-fullscreen").setAttribute('aria-pressed','false');
-  liveTracker.render();$("camera-fullscreen").focus();
+let nativeCameraFullscreen=false;
+function cameraFullscreenElement(){return document.fullscreenElement || document.webkitFullscreenElement;}
+function setCameraFullscreen(expanded){
+  document.querySelectorAll('main > :not(.workspace), .workspace > .controls').forEach(element=>element.inert=expanded);
+  $('camera-card').classList.toggle('camera-expanded',expanded);document.body.classList.toggle('camera-expanded-open',expanded);
+  $('camera-fullscreen').textContent=expanded?'Exit fullscreen':'Fullscreen camera';
+  $('camera-fullscreen').setAttribute('aria-pressed',String(expanded));
+  requestAnimationFrame(()=>liveTracker.render());
+  if(!expanded)$('camera-fullscreen').focus();
 }
-$("camera-fullscreen").onclick=()=>{
-  if($("camera-card").classList.contains('camera-expanded')){closeCameraFullscreen();return;}
-  document.querySelectorAll('main > :not(.workspace), .workspace > .controls').forEach(element=>element.inert=true);
-  $("camera-card").classList.add('camera-expanded');document.body.classList.add('camera-expanded-open');
-  $("camera-fullscreen").textContent='Exit fullscreen';$("camera-fullscreen").setAttribute('aria-pressed','true');liveTracker.render();
+async function closeCameraFullscreen(){
+  if(cameraFullscreenElement()===$('camera-card')){
+    const exit=document.exitFullscreen || document.webkitExitFullscreen;
+    try{if(exit)await exit.call(document);}catch(error){/* The browser may already have exited. */}
+  }
+  nativeCameraFullscreen=false;setCameraFullscreen(false);
+}
+$('camera-fullscreen').onclick=async()=>{
+  const card=$('camera-card');
+  if(card.classList.contains('camera-expanded')){await closeCameraFullscreen();return;}
+  setCameraFullscreen(true);
+  try{
+    if(card.requestFullscreen){await card.requestFullscreen({navigationUI:'hide'});nativeCameraFullscreen=true;}
+    else if(card.webkitRequestFullscreen){await card.webkitRequestFullscreen();nativeCameraFullscreen=true;}
+    else toast('This browser supports an expanded camera view only.');
+  }catch(error){toast('Browser fullscreen was unavailable. The camera view is expanded.');}
+  requestAnimationFrame(()=>liveTracker.render());
 };
-document.addEventListener('keydown',event=>{if(event.key==='Escape' && $("camera-card").classList.contains('camera-expanded')) closeCameraFullscreen();});
+for(const event of ['fullscreenchange','webkitfullscreenchange'])document.addEventListener(event,()=>{
+  if(cameraFullscreenElement()===$('camera-card')){nativeCameraFullscreen=true;setCameraFullscreen(true);}
+  else if(nativeCameraFullscreen){nativeCameraFullscreen=false;setCameraFullscreen(false);}
+});
+document.addEventListener('keydown',event=>{if(event.key==='Escape' && $('camera-card').classList.contains('camera-expanded'))closeCameraFullscreen();});
 new ResizeObserver(()=>liveTracker.render()).observe($("viewfinder"));
 $("fullscreen-scan").onclick=()=>{if(state.activeAttendance)scan(state.activeAttendance.id);};
 $("start-camera").onclick=startCamera;
@@ -618,10 +647,11 @@ $('confirm-delete-attendance').onclick=async()=>{
 };
 $('delete-attendance-dialog').addEventListener('cancel',event=>{if(state.attendanceBusy)event.preventDefault();});
 
-function setMovementMode(mode){stopScan();recentCheckIns.clear();state.movementMode=mode;updateControls();liveTracker.render();result('Movement mode changed','Start the scan when the entry/exit direction is correct.');}
+function setMovementMode(mode){if(window.sharedRoom?.snapshot?.source_id){window.sharedRoom.configure(mode,$('crossing-axis').value,$('entry-direction').value);return;}stopScan();recentCheckIns.clear();state.movementMode=mode;updateControls();liveTracker.render();result('Movement mode changed','Start the scan when the entry/exit direction is correct.');}
 $('attendance-flow').onchange=event=>setMovementMode(event.target.value);
 $('fullscreen-flow').onchange=event=>setMovementMode(event.target.value);
 for(const id of ['crossing-axis','entry-direction'])$(id).onchange=()=>{
+  if(window.sharedRoom?.snapshot?.source_id){window.sharedRoom.configure(state.movementMode,$('crossing-axis').value,$('entry-direction').value);return;}
   stopScan();if(id==='crossing-axis'){const vertical=$('crossing-axis').value==='y';$('entry-direction').options[0].textContent=vertical?'Top → bottom':'Left → right';$('entry-direction').options[1].textContent=vertical?'Bottom → top':'Right → left';}liveTracker.render();
 };
 function renderMovementLog(detail){

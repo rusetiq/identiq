@@ -1,3 +1,4 @@
+import json
 import base64
 import re
 import sqlite3
@@ -49,8 +50,8 @@ def setup(tmp_path):
     app = create_app(database, engine)
     app.config["TESTING"] = True
     client = app.test_client()
-    code = app.extensions['portal_access'].staff_code_path.read_text().strip()
-    assert client.post('/api/staff/login', json={'code':code}, headers={'X-Portal-Request':'1'}).status_code == 200
+    credentials = json.loads(app.extensions['portal_access'].staff_login_path.read_text())
+    assert client.post('/api/staff/login', json=credentials, headers={'X-Portal-Request':'1'}).status_code == 200
     html = client.get("/").get_data(as_text=True)
     token = re.search(r'name="local-token" content="([^"]+)"', html).group(1)
     return client, {"X-Local-Token": token}, engine, database

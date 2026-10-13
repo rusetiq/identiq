@@ -63,7 +63,7 @@ async function refreshParent(){
 }
 parentElement('parent-login-form').onsubmit=async event=>{
   event.preventDefault();const button=parentElement('parent-sign-in');button.disabled=true;parentElement('parent-login-error').hidden=true;
-  try{await parentFetch('/api/parent/login',{code:parentElement('parent-code').value});parentElement('parent-code').value='';await refreshParent();}
+  try{await parentFetch('/api/parent/login',{login_id:parentElement('parent-login-id').value.trim(),password:parentElement('parent-password').value});parentElement('parent-password').value='';await refreshParent();}
   catch(error){parentElement('parent-login-error').textContent=error.message;parentElement('parent-login-error').hidden=false;}
   finally{button.disabled=false;}
 };

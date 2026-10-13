@@ -1,5 +1,9 @@
 """Scoped parent attendance views and local staff/parent access sessions."""
 import hashlib
+import json
+import sqlite3
+
+from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import secrets
 import time
@@ -10,6 +14,8 @@ from zoneinfo import ZoneInfo
 from biometrics import FaceError
 from iphone import valid_name
 
+DUMMY_PASSWORD_HASH=generate_password_hash(secrets.token_urlsafe(32))
+
 
 class PortalAccess:
     SESSION_SECONDS = 12 * 60 * 60
@@ -18,15 +24,7 @@ class PortalAccess:
         self.store = store
         self.clock = clock
         self.failures = {}
-        self.staff_code_path = store.path.parent / 'staff-access-code.txt'
-        try:
-            descriptor = os.open(self.staff_code_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, 'w') as file:
-                file.write(secrets.token_urlsafe(24) + '\n')
-        except FileExistsError:
-            pass
-        self.staff_code_path.chmod(0o600)
-        self.staff_hash = self.digest(self.staff_code_path.read_text().strip())
+        self.staff_login_path = store.path.parent / 'staff-login.json'
         with store.connect() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS parent_access (
@@ -48,34 +46,89 @@ class PortalAccess:
                 CREATE INDEX IF NOT EXISTS portal_expiry ON portal_sessions(expires_at);
             ''')
 
+            columns={row['name'] for row in db.execute('PRAGMA table_info(parent_access)')}
+            migrating='login_id' not in columns
+            if migrating:
+                db.execute("ALTER TABLE parent_access ADD COLUMN login_id TEXT NOT NULL DEFAULT ''")
+                db.execute("ALTER TABLE parent_access ADD COLUMN password_hash TEXT")
+                db.execute("UPDATE parent_access SET login_id='parent-' || id")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS parent_login_id ON parent_access(login_id COLLATE NOCASE)")
+            db.execute("""CREATE TABLE IF NOT EXISTS staff_credentials (
+                id INTEGER PRIMARY KEY CHECK(id=1),login_id TEXT NOT NULL,password_hash TEXT NOT NULL)""")
+            if not db.execute('SELECT 1 FROM staff_credentials').fetchone():
+                try:
+                    descriptor=os.open(self.staff_login_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                except FileExistsError:
+                    credentials=json.loads(self.staff_login_path.read_text())
+                else:
+                    credentials={'login_id':'admin','password':secrets.token_urlsafe(18)}
+                    with os.fdopen(descriptor,'w') as file:json.dump(credentials,file,indent=2)
+                self.staff_login_path.chmod(0o600)
+                db.execute('INSERT INTO staff_credentials VALUES(1,?,?)',
+                    (self.valid_login_id(credentials['login_id']),generate_password_hash(self.valid_password(credentials['password']))))
+                migrating=True
+            if migrating:db.execute('DELETE FROM portal_sessions')
+
     @staticmethod
     def digest(value):
         return hashlib.sha256(value.encode()).hexdigest()
 
-    def login(self, role, code, remote):
-        now = self.clock()
-        key = (role, remote)
+    @staticmethod
+    def valid_login_id(value):
+        if not isinstance(value,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._@-]{2,63}',value.strip()):
+            raise FaceError('invalid_login_id','Use a login ID of 3–64 letters, numbers, dots, underscores, @ or hyphens.')
+        return value.strip().lower()
+
+    @staticmethod
+    def valid_password(value):
+        if not isinstance(value,str) or not 10<=len(value)<=128:
+            raise FaceError('invalid_password','Use a password of 10–128 characters.')
+        return value
+
+    def login(self, role, login_id, password, remote):
+        now=self.clock();key=(role,remote)
         with self.store.lock:
-            self.failures = {k: [t for t in times if now-t < 60] for k, times in self.failures.items() if any(now-t < 60 for t in times)}
-            if len(self.failures.get(key, [])) >= 10:
-                raise FaceError('login_limited', 'Too many attempts. Wait one minute before trying again.')
-            candidate = self.digest(code.strip()) if isinstance(code, str) and 1 <= len(code) <= 128 else ''
-            parent_id = None
-            valid = role == 'staff' and secrets.compare_digest(candidate, self.staff_hash)
-            if role == 'parent':
-                with self.store.connect() as db:
-                    parent = db.execute('SELECT id FROM parent_access WHERE code_hash=? AND revoked_at IS NULL', (candidate,)).fetchone()
-                valid = parent is not None
-                parent_id = parent['id'] if valid else None
-            if not valid:
-                self.failures.setdefault(key, []).append(now)
-                raise FaceError('invalid_access', 'That access code is invalid or has been revoked.')
-            self.failures.pop(key, None)
-            session_token = secrets.token_urlsafe(32)
+            self.failures={k:[t for t in times if now-t<60] for k,times in self.failures.items() if any(now-t<60 for t in times)}
+            if len(self.failures.get(key,[]))>=10:
+                raise FaceError('login_limited','Too many attempts. Wait one minute before trying again.')
+            candidate=login_id.strip().lower() if isinstance(login_id,str) and len(login_id)<=64 else ''
             with self.store.connect() as db:
-                db.execute('DELETE FROM portal_sessions WHERE expires_at<=?', (now,))
-                db.execute('INSERT INTO portal_sessions VALUES(?,?,?,?)', (self.digest(session_token), role, parent_id, now+self.SESSION_SECONDS))
+                row=db.execute('SELECT * FROM staff_credentials WHERE login_id=? COLLATE NOCASE',(candidate,)).fetchone() if role=='staff' else db.execute(
+                    'SELECT * FROM parent_access WHERE login_id=? COLLATE NOCASE AND revoked_at IS NULL',(candidate,)).fetchone()
+            encoded=row['password_hash'] if row and row['password_hash'] else DUMMY_PASSWORD_HASH
+            valid=check_password_hash(encoded,password if isinstance(password,str) and len(password)<=128 else '')
+            if not row or not row['password_hash'] or not valid:
+                self.failures.setdefault(key,[]).append(now)
+                raise FaceError('invalid_access','Login ID or password is incorrect.')
+            self.failures.pop(key,None);session_token=secrets.token_urlsafe(32)
+            with self.store.connect() as db:
+                db.execute('DELETE FROM portal_sessions WHERE expires_at<=?',(now,))
+                db.execute('INSERT INTO portal_sessions VALUES(?,?,?,?)',(self.digest(session_token),role,row['id'] if role=='parent' else None,now+self.SESSION_SECONDS))
             return session_token
+
+    def staff_account(self):
+        with self.store.connect() as db:return {'login_id':db.execute('SELECT login_id FROM staff_credentials WHERE id=1').fetchone()[0]}
+
+    def update_staff_credentials(self, current_password, login_id, password):
+        login_id=self.valid_login_id(login_id);password=self.valid_password(password)
+        with self.store.lock,self.store.connect() as db:
+            row=db.execute('SELECT password_hash FROM staff_credentials WHERE id=1').fetchone()
+            if not isinstance(current_password,str) or len(current_password)>128 or not check_password_hash(row[0],current_password):
+                raise FaceError('invalid_access','Current password is incorrect.')
+            db.execute('UPDATE staff_credentials SET login_id=?,password_hash=? WHERE id=1',(login_id,generate_password_hash(password)))
+            db.execute("DELETE FROM portal_sessions WHERE role='staff'")
+        self.staff_login_path.unlink(missing_ok=True)
+        return {'login_id':login_id}
+
+    def reset_parent_credentials(self, parent_id, login_id, password):
+        login_id=self.valid_login_id(login_id);password=self.valid_password(password)
+        with self.store.lock,self.store.connect() as db:
+            row=db.execute('SELECT id FROM parent_access WHERE id=? AND revoked_at IS NULL',(parent_id,)).fetchone()
+            if row is None:raise FaceError('parent_missing','That parent account was not found.')
+            try:db.execute('UPDATE parent_access SET login_id=?,password_hash=? WHERE id=?',(login_id,generate_password_hash(password),parent_id))
+            except sqlite3.IntegrityError as error:raise FaceError('duplicate_login_id','That parent login ID is already assigned.') from error
+            db.execute('DELETE FROM portal_sessions WHERE parent_id=?',(parent_id,))
+        return {'login_id':login_id}
 
     def authenticate(self, token, role):
         if not isinstance(token, str) or len(token) > 128:
@@ -94,21 +147,22 @@ class PortalAccess:
 
     def links(self):
         with self.store.connect() as db:
-            return [dict(row) for row in db.execute('''SELECT a.id,a.name,a.person_id,p.name AS student_name,a.created_at
+            return [dict(row) for row in db.execute('''SELECT a.id,a.name,a.person_id,p.name AS student_name,a.created_at,a.login_id,(a.password_hash IS NULL) AS needs_password
                 FROM parent_access a JOIN people p ON p.id=a.person_id WHERE a.revoked_at IS NULL ORDER BY a.id DESC''')]
 
-    def create_link(self, name, person_id):
+    def create_link(self, name, person_id, login_id, password):
         name = valid_name(name)
         if type(person_id) is not int or person_id < 1:
             raise FaceError('invalid_person', 'Choose an enrolled student.')
-        code = secrets.token_urlsafe(24)
+        login_id=self.valid_login_id(login_id);password=self.valid_password(password)
         with self.store.lock, self.store.connect() as db:
             person = db.execute('SELECT name FROM people WHERE id=?', (person_id,)).fetchone()
             if person is None:
                 raise FaceError('person_missing', 'That student is no longer enrolled.')
-            parent_id = db.execute('INSERT INTO parent_access(name,person_id,code_hash) VALUES(?,?,?)',
-                                  (name, person_id, self.digest(code))).lastrowid
-        return {'id': parent_id, 'name': name, 'student_name': person['name'], 'person_id': person_id, 'access_code': code}
+            try:parent_id=db.execute('INSERT INTO parent_access(name,person_id,code_hash,login_id,password_hash) VALUES(?,?,?,?,?)',
+                (name,person_id,self.digest(secrets.token_urlsafe(32)),login_id,generate_password_hash(password))).lastrowid
+            except sqlite3.IntegrityError as error:raise FaceError('duplicate_login_id','That parent login ID is already assigned.') from error
+        return {'id': parent_id, 'name': name, 'student_name': person['name'], 'person_id': person_id, 'login_id':login_id}
 
     def revoke(self, parent_id):
         with self.store.lock, self.store.connect() as db:

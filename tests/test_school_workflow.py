@@ -71,7 +71,7 @@ def test_manual_movement_auth_notes_history_parent_scope_and_correction(setup,im
     client,headers,_,_=setup
     student=enroll(client,headers,image).json['person'];sid=start(client,headers).json['session']['id']
     record=client.get(f'/api/attendance/sessions/{sid}').json['session']['roster'][0]['id']
-    parent=parent_client(client,link(client,headers,student['id']).json['parent']['access_code'])
+    parent=parent_client(client,link(client,headers,student['id']).json['parent']['login_id'])
     path=f'/api/attendance/sessions/{sid}/records/{record}/movement'
     assert parent.post(path,json={'action':'check_in','note':'Reception'},headers=headers).status_code==401
     assert client.post(path,json={'action':'check_in','note':'Reception'}).status_code==403
@@ -114,7 +114,7 @@ def test_student_profiles_unique_ids_class_rosters_snapshots_and_auth(setup,imag
     assert client.patch(path,json={'student_id':' S-1 ','class_name':'7A'},headers=headers).json['person']['student_id']=='S-1'
     assert client.patch(f"/api/people/{second['id']}/profile",json={'student_id':'s-1','class_name':'7B'},headers=headers).status_code==422
     assert client.patch(path,json={'student_id':None,'class_name':'7A'},headers=headers).status_code==422
-    parent=parent_client(client,link(client,headers,first['id']).json['parent']['access_code'])
+    parent=parent_client(client,link(client,headers,first['id']).json['parent']['login_id'])
     assert parent.patch(path,json={'student_id':'tamper','class_name':'7B'},headers=headers).status_code==401
     session=client.post('/api/attendance/sessions',json={'name':'7A day','class_name':'7A'},headers=headers).json['session']
     assert len(session['roster'])==1 and session['roster'][0]['student_id']=='S-1'

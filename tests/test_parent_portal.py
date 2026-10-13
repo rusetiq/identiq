@@ -1,4 +1,6 @@
-import hashlib
+import json
+import uuid
+from werkzeug.security import check_password_hash
 import re
 import stat
 
@@ -6,16 +8,17 @@ from app import create_app
 from test_app import setup, image, enroll, vector
 from test_attendance import start, clock, recognize
 
+TEST_PARENT_PASSWORD='test-parent-password-2026'
 PORTAL_HEADERS = {'X-Portal-Request':'1'}
 
 
 def link(client, headers, person_id, name='Alex guardian'):
-    return client.post('/api/parents', json={'name':name,'person_id':person_id}, headers=headers)
+    return client.post('/api/parents', json={'name':name,'person_id':person_id,'login_id':'parent-'+uuid.uuid4().hex,'password':TEST_PARENT_PASSWORD}, headers=headers)
 
 
-def parent_client(staff, code):
+def parent_client(staff, login_id):
     client=staff.application.test_client()
-    response=client.post('/api/parent/login',json={'code':code},headers=PORTAL_HEADERS)
+    response=client.post('/api/parent/login',json={'login_id':login_id,'password':TEST_PARENT_PASSWORD},headers=PORTAL_HEADERS)
     assert response.status_code==200
     assert 'HttpOnly' in response.headers['Set-Cookie'] and 'SameSite=Strict' in response.headers['Set-Cookie']
     return client
@@ -31,7 +34,7 @@ def test_staff_sign_in_protects_every_roster_route(setup):
     assert guest.post('/api/enroll',json={},headers=headers).status_code==401
     assert guest.get('/parents').status_code==200
     assert 'local-token' not in guest.get('/parents').text
-    assert stat.S_IMODE((database.parent/'staff-access-code.txt').stat().st_mode)==0o600
+    assert stat.S_IMODE((database.parent/'staff-login.json').stat().st_mode)==0o600
     assert guest.get('/data/staff-access-code.txt').status_code==401
 
 
@@ -40,7 +43,7 @@ def test_parent_sees_only_linked_student_and_camera_updates(setup,image):
     person=enroll(staff,headers,image,name='Alex').json['person']
     engine.vector=vector(1);enroll(staff,headers,image,name='Private other student')
     created=link(staff,headers,person['id']).json['parent']
-    parent=parent_client(staff,created['access_code'])
+    parent=parent_client(staff,created['login_id'])
     empty=parent.get('/api/parent/attendance').json
     assert empty['student_name']=='Alex' and empty['history']==[] and empty['current'] is None
     session=start(staff,headers).json['session'];sid=session['id']
@@ -62,30 +65,30 @@ def test_parent_sees_only_linked_student_and_camera_updates(setup,image):
     assert saved['current'] is None and saved['history'][0]['status']=='present'
     assert saved['history'][0]['session_status']=='closed'
     with staff.application.extensions['attendance'].store.connect() as db:
-        row=db.execute('SELECT code_hash FROM parent_access').fetchone()
-        assert row['code_hash']==hashlib.sha256(created['access_code'].encode()).hexdigest()
-    assert created['access_code'] not in staff.get('/api/parents').text
+        row=db.execute('SELECT password_hash FROM parent_access').fetchone()
+        assert check_password_hash(row['password_hash'],TEST_PARENT_PASSWORD)
+    assert TEST_PARENT_PASSWORD not in staff.get('/api/parents').text
 
 
 def test_parent_cannot_open_staff_or_modify_attendance(setup,image):
     staff,headers,_,_=setup
     person=enroll(staff,headers,image).json['person']
     created=link(staff,headers,person['id']).json['parent']
-    parent=parent_client(staff,created['access_code'])
+    parent=parent_client(staff,created['login_id'])
     assert 'local-token' not in parent.get('/').text
     for route in ['/api/people','/api/parents','/api/attendance/sessions']:
         assert parent.get(route).status_code==401
     assert parent.post('/api/attendance/sessions',json={'name':'Class'},headers=headers).status_code==401
     assert parent.delete(f"/api/people/{person['id']}",headers=headers).status_code==401
-    assert parent.post('/api/staff/login',json={'code':created['access_code']},headers=PORTAL_HEADERS).json['code']=='invalid_access'
-    staff_code=staff.application.extensions['portal_access'].staff_code_path.read_text().strip()
-    assert parent.post('/api/parent/login',json={'code':staff_code},headers=PORTAL_HEADERS).json['code']=='invalid_access'
+    assert parent.post('/api/staff/login',json={'login_id':created['login_id'],'password':TEST_PARENT_PASSWORD},headers=PORTAL_HEADERS).json['code']=='invalid_access'
+    staff_credentials=json.loads(staff.application.extensions['portal_access'].staff_login_path.read_text())
+    assert parent.post('/api/parent/login',json=staff_credentials,headers=PORTAL_HEADERS).json['code']=='invalid_access'
     assert staff.get('/api/parent/attendance').status_code==401
 
 
 def test_absence_and_staff_correction_visible_to_parent(setup,image):
     staff,headers,_,_=setup
-    person=enroll(staff,headers,image).json['person'];parent=parent_client(staff,link(staff,headers,person['id']).json['parent']['access_code'])
+    person=enroll(staff,headers,image).json['person'];parent=parent_client(staff,link(staff,headers,person['id']).json['parent']['login_id'])
     session=start(staff,headers).json['session'];sid=session['id'];rid=session['roster'][0]['id']
     staff.post(f'/api/attendance/sessions/{sid}/finish',json={},headers=headers)
     assert parent.get('/api/parent/attendance').json['history'][0]['status']=='absent'
@@ -96,25 +99,25 @@ def test_absence_and_staff_correction_visible_to_parent(setup,image):
 
 def test_revoke_and_delete_invalidate_existing_parent_sessions(setup,image):
     staff,headers,_,_=setup;person=enroll(staff,headers,image).json['person']
-    first=link(staff,headers,person['id']).json['parent'];parent=parent_client(staff,first['access_code'])
+    first=link(staff,headers,person['id']).json['parent'];parent=parent_client(staff,first['login_id'])
     assert staff.post(f"/api/parents/{first['id']}/revoke",json={},headers=headers).json['revoked']
     assert parent.get('/api/parent/attendance').status_code==401
-    assert parent.post('/api/parent/login',json={'code':first['access_code']},headers=PORTAL_HEADERS).json['code']=='invalid_access'
+    assert parent.post('/api/parent/login',json={'login_id':first['login_id'],'password':TEST_PARENT_PASSWORD},headers=PORTAL_HEADERS).json['code']=='invalid_access'
     assert staff.get('/api/parents').json['parents']==[]
-    second=link(staff,headers,person['id']).json['parent'];parent=parent_client(staff,second['access_code'])
+    second=link(staff,headers,person['id']).json['parent'];parent=parent_client(staff,second['login_id'])
     staff.delete(f"/api/people/{person['id']}",headers=headers)
     assert parent.get('/api/parent/attendance').status_code==401
 
 
 def test_logout_expiry_and_restart(setup,image):
     staff,headers,engine,database=setup;person=enroll(staff,headers,image).json['person'];created=link(staff,headers,person['id']).json['parent']
-    parent=parent_client(staff,created['access_code']);cookie=parent.get_cookie('identiq_parent',path='/api/parent')
+    parent=parent_client(staff,created['login_id']);cookie=parent.get_cookie('identiq_parent',path='/api/parent')
     restarted=create_app(database,engine).test_client();restarted.set_cookie('identiq_parent',cookie.value,path='/api/parent')
     assert restarted.get('/api/parent/attendance').status_code==200
     parent.post('/api/parent/logout',json={},headers=PORTAL_HEADERS)
     assert parent.get('/api/parent/attendance').status_code==401
     assert restarted.get('/api/parent/attendance').status_code==401
-    parent=parent_client(staff,created['access_code']);access=staff.application.extensions['portal_access'];now=access.clock();access.clock=lambda:now+access.SESSION_SECONDS+1
+    parent=parent_client(staff,created['login_id']);access=staff.application.extensions['portal_access'];now=access.clock();access.clock=lambda:now+access.SESSION_SECONDS+1
     assert parent.get('/api/parent/attendance').status_code==401
     assert staff.get('/api/people').status_code==401
 
@@ -136,7 +139,7 @@ def test_student_enrolled_after_active_roster_and_separate_parent_links(setup,im
     staff,headers,engine,_=setup;enroll(staff,headers,image);start(staff,headers)
     engine.vector=vector(1);person=enroll(staff,headers,image,name='Late enrollment').json['person']
     one=link(staff,headers,person['id'],name='First guardian').json['parent'];two=link(staff,headers,person['id'],name='Second guardian').json['parent']
-    parent=parent_client(staff,one['access_code']);other=parent_client(staff,two['access_code'])
+    parent=parent_client(staff,one['login_id']);other=parent_client(staff,two['login_id'])
     view=parent.get('/api/parent/attendance').json
     assert view['active_session'] and view['current'] is None and view['history']==[]
     staff.post(f"/api/parents/{one['id']}/revoke",json={},headers=headers)
@@ -146,7 +149,7 @@ def test_student_enrolled_after_active_roster_and_separate_parent_links(setup,im
 
 def test_staff_logout_and_public_pages_never_expose_code(setup):
     staff,headers,_,_=setup
-    code=staff.application.extensions['portal_access'].staff_code_path.read_text().strip()
+    code=json.loads(staff.application.extensions['portal_access'].staff_login_path.read_text())['password']
     assert code not in staff.get('/parents').text
     assert staff.post('/api/staff/logout',json={},headers=headers).status_code==200
     assert staff.get('/api/people').status_code==401
@@ -158,7 +161,7 @@ def test_parent_calendar_uses_dubai_month_boundaries_and_full_month(setup,image)
     person=enroll(staff,headers,image,name='Calendar student').json['person']
     engine.vector=vector(1);other=enroll(staff,headers,image,name='Other student').json['person']
     access=link(staff,headers,person['id']).json
-    parent=parent_client(staff,access['parent']['access_code'])
+    parent=parent_client(staff,access['parent']['login_id'])
     store=staff.application.extensions['portal_access'].store
     with store.connect() as db:
         for index,when in enumerate(['2026-09-30T19:59:59.000Z','2026-09-30T20:00:00.000Z','2026-10-31T20:00:00.000Z']+['2026-10-15T08:00:00.000Z']*101):

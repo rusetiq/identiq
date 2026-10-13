@@ -1,3 +1,4 @@
+import json
 import csv
 import io
 import uuid
@@ -157,8 +158,8 @@ def test_closed_records_load_after_app_restart(setup,image):
     sid=start(client,headers).json['session']['id']
     client.post(f'/api/attendance/sessions/{sid}/finish',json={},headers=headers)
     restarted=create_app(database,FakeEngine()).test_client()
-    code=(database.parent/'staff-access-code.txt').read_text().strip()
-    restarted.post('/api/staff/login',json={'code':code},headers={'X-Portal-Request':'1'})
+    credentials=json.loads((database.parent/'staff-login.json').read_text())
+    restarted.post('/api/staff/login',json=credentials,headers={'X-Portal-Request':'1'})
     result=restarted.get(f'/api/attendance/sessions/{sid}').json['session']
     assert result['status']=='closed' and result['counts']['absent']==1
 
@@ -170,7 +171,7 @@ def test_staff_clear_all_requires_confirmation_preserves_access_and_clears_backu
     client,headers,_,database=setup
     person=enroll(client,headers,image).json['person']
     created=link(client,headers,person['id']).json['parent']
-    parent=parent_client(client,created['access_code'])
+    parent=parent_client(client,created['login_id'])
     first=start(client,headers).json['session']['id']
     client.post(f'/api/attendance/sessions/{first}/finish',json={},headers=headers)
     second=start(client,headers).json['session']['id']

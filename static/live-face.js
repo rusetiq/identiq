@@ -73,7 +73,8 @@ class FaceTracker {
         ctx.beginPath();ctx.moveTo(cx+length*sx,cy);ctx.lineTo(cx,cy);ctx.lineTo(cx,cy+length*sy);ctx.stroke();
       }
       if(region.label){
-        const unit=devicePixelRatio,size=Math.max(20,Math.min(36,canvas.clientWidth*.028))*unit,pad=8*unit;
+        const expanded=canvas.closest('.camera-expanded');
+        const unit=devicePixelRatio,size=(expanded?Math.max(38,Math.min(84,canvas.clientWidth*.072)):Math.max(20,Math.min(36,canvas.clientWidth*.028)))*unit,pad=8*unit;
         ctx.font=`600 ${size}px -apple-system, sans-serif`;
         const available=Math.max(1,width-2*pad),chars=Array.from(region.label);let label=chars.join('');
         while(chars.length && ctx.measureText(label).width>available-2*pad){chars.pop();label=chars.join('')+'…';}
