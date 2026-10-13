@@ -16,12 +16,22 @@ from app import create_app
 
 def lan_address(value=None):
     if value is None:
-        result = subprocess.run(['ipconfig', 'getifaddr', 'en0'], capture_output=True, text=True)
-        value = result.stdout.strip()
+        if sys.platform == 'darwin':
+            result = subprocess.run(['ipconfig', 'getifaddr', 'en0'], capture_output=True, text=True)
+            value = result.stdout.strip()
+        if not value:
+            # Cross-platform fallback for Windows, Linux, or secondary macOS interfaces
+            import socket
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.connect(('8.8.8.8', 80))
+                    value = sock.getsockname()[0]
+            except Exception:
+                value = ''
     try:
         address = ipaddress.IPv4Address(value)
     except ipaddress.AddressValueError as error:
-        raise ValueError('No Wi-Fi IPv4 address found. Use --address with your private LAN IP.') from error
+        raise ValueError('No private LAN IPv4 address found. Use --address with your private LAN IP.') from error
     if not address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified:
         raise ValueError('Choose a private LAN IPv4 address.')
     return str(address)
