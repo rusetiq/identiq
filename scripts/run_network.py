@@ -159,6 +159,7 @@ def main():
     if args.https_port and (not args.http or not 1024<=args.https_port<=65535 or args.https_port==args.port):
         parser.error('--https-port needs --http and a separate port between 1024 and 65535.')
     app=create_app(allowed_hosts={address})
+    print(f"App version: {app.config['IDENTIQ_BUILD']}",flush=True)
     if args.http:
         app.config['PORTAL_COOKIE_SUFFIX']='_http'
         local=make_server('127.0.0.1',args.port,app,threaded=True)

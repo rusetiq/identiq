@@ -59,7 +59,13 @@ class SharedRoom {
       this.clearPreview();connectionStatus('socket',true);updateControls();this.schedule();
     };
   }
-  send(message){if(this.connected && this.socket.readyState===WebSocket.OPEN){this.socket.send(JSON.stringify(message));return true;}connectionStatus('socket',true);return false;}
+  send(message){
+    if(this.connected && this.socket.readyState===WebSocket.OPEN){
+      try{this.socket.send(message instanceof Blob?message:JSON.stringify(message));return true;}
+      catch(error){this.socket.close();}
+    }
+    connectionStatus('socket',true);return false;
+  }
   toggleScan(){
     const pause=this.snapshot?.running || this.snapshot?.armed || this.snapshot?.recovering;
     if(pause)this.restoreSession=null;
@@ -116,7 +122,7 @@ class SharedRoom {
     ctx.fillStyle='#24282e';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.save();ctx.translate(canvas.width,0);ctx.scale(-1,1);ctx.drawImage(video,(canvas.width-w)/2,(canvas.height-h)/2,w,h);ctx.restore();
     const overlay=$('overlay');if(overlay.width && overlay.height)ctx.drawImage(overlay,0,0,canvas.width,canvas.height);
     this.encoding=true;const socket=this.socket,key=this.resumeKey;
-    canvas.toBlob(blob=>{this.encoding=false;if(blob && this.source && this.connected && this.socket===socket && this.resumeKey===key && socket.bufferedAmount<350000)socket.send(blob);},'image/jpeg',.72);
+    canvas.toBlob(blob=>{this.encoding=false;if(blob && this.source && this.connected && this.socket===socket && this.resumeKey===key && socket.bufferedAmount<350000)this.send(blob);},'image/jpeg',.72);
   }
   showPreview(blob){
     if(this.source || !this.snapshot?.ready || state.mode!=='attendance')return;

@@ -9,20 +9,26 @@ function showParentLogin(){
   parentSignature='';parentCalendar.clear();
   for(const id of ['student-name','student-profile','parent-greeting','parent-session','parent-status-title','parent-status-detail','parent-first-seen','parent-check-out','parent-last-seen','parent-sync']) parentElement(id).textContent='';parentElement('parent-history').replaceChildren();
 }
-async function parentFetch(path,body){
-  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);
-  try{
-  const response=await fetch(path,{signal:controller.signal,...(body ? {method:'POST',headers:{'Content-Type':'application/json','X-Portal-Request':'1'},body:JSON.stringify(body)} : {})});
-  const data=await response.json();
-  if(!response.ok) throw Object.assign(new Error(data.error || 'Could not load attendance.'),{status:response.status});
-  return data;
-  }catch(error){if(error.name==='AbortError') throw new Error('The server took too long to respond. Try again.');throw error;}finally{clearTimeout(timeout);}
+let parentRetry=null,parentFailures=0,parentRecovering=false;
+function retryParent(){
+  if(parentRetry)return;
+  parentRecovering=true;
+  parentRetry=setTimeout(()=>{
+    parentRetry=null;
+    if(document.hidden || parentRefreshing){retryParent();return;}
+    parentRefreshing=true;refreshParent().finally(()=>parentRefreshing=false);
+  },Math.min(30000,1000*2**Math.min(parentFailures++,5)));
 }
+async function parentFetch(path,body){
+  return window.IdentiqNetwork.request(path,{method:body===undefined?'GET':'POST',body,headers:body===undefined?{}:{'X-Portal-Request':'1'}});
+}
+
 async function refreshParent(){
   const request=++parentRequest;
   try{
     const data=await parentFetch(`/api/parent/attendance?month=${encodeURIComponent(parentCalendar.month)}`);
     if(request!==parentRequest) return;
+    clearTimeout(parentRetry);parentRetry=null;parentFailures=0;parentRecovering=false;parentElement('parent-login-error').hidden=true;
     const signature=JSON.stringify(data);
     if(signature===parentSignature){parentElement('parent-sync').textContent=`Updated ${new Date().toLocaleTimeString()}. Refreshes every 10 seconds while this page is open.`;return;}
     parentSignature=signature;parentCalendar.update(data);
@@ -56,8 +62,9 @@ async function refreshParent(){
     parentElement('parent-sync').textContent=`Updated ${new Date().toLocaleTimeString()}. Refreshes every 10 seconds while this page is open.`;
   }catch(error){
     if(request!==parentRequest) return;
-    if(error.status===401){showParentLogin();return;}
-    if(parentSignedIn) parentElement('parent-sync').textContent='Could not refresh. Showing the last loaded attendance; try Refresh.';
+    if(error.status===401){clearTimeout(parentRetry);parentRetry=null;parentRecovering=false;showParentLogin();return;}
+    if(window.IdentiqNetwork.transient(error))retryParent();
+    if(parentSignedIn) parentElement('parent-sync').textContent='Connection interrupted. Reconnecting automatically; the last loaded attendance is shown.';
     else{parentElement('parent-login-error').textContent=error.message;parentElement('parent-login-error').hidden=false;}
   }
 }
@@ -75,5 +82,7 @@ parentElement('parent-logout').onclick=async()=>{
 };
 parentElement('parent-refresh').onclick=refreshParent;
 setInterval(()=>{if(parentSignedIn && !document.hidden && !parentRefreshing){parentRefreshing=true;refreshParent().finally(()=>parentRefreshing=false);}},10000);
-document.addEventListener('visibilitychange',()=>{if(parentSignedIn && !document.hidden) refreshParent();});
+document.addEventListener('visibilitychange',()=>{if((parentSignedIn || parentRecovering) && !document.hidden) refreshParent();});
 refreshParent();
+
+window.addEventListener('online',()=>{if(parentSignedIn || parentRecovering)refreshParent();});

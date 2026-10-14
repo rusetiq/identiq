@@ -124,3 +124,9 @@ The camera page shows one connection notice instead of repeated network-error po
 Empty scenes use fewer recognition requests, previews upload less often without viewers, and connected staff tabs receive attendance changes over WebSockets instead of redundant polling. Starting scanning requests a screen wake lock where supported. Keep the designated camera page open and the device unlocked: a closed browser, locked device, suspended OS or expired login still needs attention.
 
 The network launcher restarts an unexpected server exit using the original IP address. Ctrl+C stops it. Startup failures are limited to three attempts so an invalid address or occupied port does not loop forever. A stalled HTTPS handshake times out in its own worker and cannot block other devices. When the laptop’s Wi-Fi address changes, restart with the new approved address and trust its new public certificate on the tablet.
+
+## after pulling an update
+
+`git pull` updates files, but an already running server keeps its loaded Python code. Stop the existing server with Ctrl+C, start it again using the same command and refresh the tablet page. JavaScript and CSS now carry an app version in their URLs so refreshed pages request the matching assets.
+
+Choose **Connection check** on the sign-in page, parent portal or camera panel. It shows the tablet address, page version, running server version, installed version, reachability and the last failed request. It distinguishes a server that needs restarting from a tablet page that needs refreshing. Request bodies, credentials, student records and images are excluded. All pages use bounded request deadlines and readable network errors; parent attendance reads reconnect automatically. Enrollment, login and other mutations are never automatically replayed after a transport failure.

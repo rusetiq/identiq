@@ -40,3 +40,5 @@
 @media(max-width:530px){.camera-expanded .camera-names{grid-template-columns:1fr;bottom:108px;max-height:45%}.camera-expanded .camera-name strong{font-size:40px;font-size:clamp(34px,8vw,52px)}.camera-expanded .camera-name span{font-size:20px}}
 
 .connection-status{position:sticky;top:0;z-index:100;background:#fff2cf;color:#594015;padding:12px 20px;margin:0;text-align:center;font-weight:600}.connection-status[hidden]{display:none}#student-profile-dialog{max-height:90dvh;overflow:auto}#student-profile-form input,#student-profile-form select{margin-bottom:12px}
+
+.connection-tools{display:flex;gap:16px;align-items:center;justify-content:center;margin:18px 0}.app-version{color:#656b75;font-size:12px;overflow-wrap:anywhere}.connection-check-results{display:grid;grid-template-columns:minmax(100px,1fr) 2fr;gap:12px 18px;font-size:14px}.connection-check-results dt{font-weight:600}.connection-check-results dd{margin:0;overflow-wrap:anywhere}#connection-check-dialog{max-width:600px;width:calc(100% - 32px);max-height:90dvh;overflow:auto}.camera-expanded #connection-check-dialog{font-size:16px}

@@ -16,12 +16,15 @@ from biometrics import FaceEngine, FaceError, SAMPLES, THRESHOLD, Store, decode_
 from iphone import valid_name, validate_capture
 from attendance import Attendance
 from parent_portal import PortalAccess
+from build_info import installed_build
 
 ROOT = Path(__file__).resolve().parent
 
 
 def create_app(database=None, engine=None, allowed_hosts=None):
     app = Flask(__name__)
+    running_build=installed_build()
+    app.config['IDENTIQ_BUILD']=running_build
     permitted_hosts = {'localhost', '127.0.0.1'} | set(allowed_hosts or ())
     app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
     token = secrets.token_urlsafe(32)
@@ -33,7 +36,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     sock=Sock(app)
     @app.context_processor
     def stylesheet_version():
-        return {'style_version': (ROOT / 'static' / 'style.css').stat().st_mtime_ns}
+        return {'style_version':running_build,'build_version':running_build}
 
     access = PortalAccess(store)
     app.extensions["portal_access"] = access
@@ -86,6 +89,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
         if response.status_code<400 and request.method in {"POST","PATCH","DELETE"} and request.path.startswith("/api/attendance/"):
             shared.attendance_changed()
         response.headers["Cache-Control"] = "no-store"
+        response.headers['X-Identiq-Build']=running_build
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(self), microphone=()"
@@ -106,6 +110,9 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.get('/connection-check')
     def connection_check():
+        if request.args.get('format')=='json':
+            current_build=installed_build()
+            return jsonify(ok=True,running_build=running_build,installed_build=current_build,needs_restart=running_build!=current_build)
         return Response('Identiq connection OK. This device can reach the attendance laptop.\n', mimetype='text/plain')
 
     @app.get('/network-certificate')

@@ -23,7 +23,7 @@ function connectionStatus(channel,failed){
   const banner=$('connection-status');banner.hidden=!connectionIssues.size;
   banner.textContent=navigator.onLine===false?'Network offline. Scanning will resume when the connection returns.':'Connection interrupted. Reconnecting automatically…';
 }
-const transientError=error=>['network_unavailable','server_timeout','server_unavailable'].includes(error.code);
+const transientError=error=>window.IdentiqNetwork.transient(error);
 let refreshingToken=null,signingOut=false;
 async function refreshClientToken(){
   if(!refreshingToken)refreshingToken=api('/api/client-context').then(context=>{token=context.token;return token;}).finally(()=>refreshingToken=null);
@@ -33,27 +33,19 @@ function expiredSession(){
   if(signingOut)return;signingOut=true;window.sharedRoom?.shutdown();stopCamera();window.location.assign('/?expired=1');
 }
 async function api(path, method = "GET", data, signal, refreshed=false) {
-  const controller=new AbortController(), cancel=()=>controller.abort();
-  if(signal?.aborted)controller.abort();else signal?.addEventListener('abort',cancel,{once:true});
-  const timeout=setTimeout(cancel,10000);
-  try {
-    const response=await fetch(path,{method,signal:controller.signal,headers:{"Content-Type":"application/json","X-Local-Token":token},...(data?{body:JSON.stringify(data)}:{})});
-    if(response.status===401){expiredSession();throw Object.assign(new Error('Please sign in again.'),{code:'staff_required'});}
-    if([408,500,502,503,504].includes(response.status))throw Object.assign(new Error('The server is reconnecting.'),{code:'server_unavailable'});
-    let body;try{body=await response.json();}catch(error){throw Object.assign(new Error('The server returned an incomplete response.'),{code:'server_unavailable'});}
-    connectionStatus('api',false);
-    if(response.status===403 && body.code==='invalid_token' && !refreshed){
-      await refreshClientToken();if(signal?.aborted)throw Object.assign(new Error('Scan cancelled.'),{code:'cancelled'});
+  try{
+    const body=await window.IdentiqNetwork.request(path,{method,body:data,signal,headers:{"X-Local-Token":token}});
+    connectionStatus('api',false);return body;
+  }catch(error){
+    if(error.status===401){expiredSession();throw error;}
+    if(error.status===403 && error.code==='invalid_token' && !refreshed){
+      await refreshClientToken();
+      if(signal?.aborted)throw Object.assign(new Error('Scan cancelled.'),{code:'cancelled'});
       return api(path,method,data,signal,true);
     }
-    if(!response.ok)throw Object.assign(new Error(body.error || 'Request failed. Try again.'),{code:body.code});
-    return body;
-  }catch(error){
-    if(error.name==='AbortError')error=Object.assign(new Error(signal?.aborted?'Scan cancelled.':'The server is taking too long. Reconnecting…'),{code:signal?.aborted?'cancelled':'server_timeout'});
-    if(error instanceof TypeError)error=Object.assign(new Error(method==='GET'?'Connection interrupted. Reconnecting…':'Connection interrupted. Check whether your changes were saved before retrying.'),{code:'network_unavailable'});
     if(transientError(error))connectionStatus('api',true);
     throw error;
-  }finally{clearTimeout(timeout);signal?.removeEventListener('abort',cancel);}
+  }
 }
 
 function updateControls() {
