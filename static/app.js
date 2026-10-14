@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const token = document.querySelector('meta[name="local-token"]').content;
+let token = document.querySelector('meta[name="local-token"]').content;
 const state = { stream: null, mode: "attendance", scanning: false, enrolling: false, ready: false, people: [], activeAttendance: null, viewedAttendance: null, attendanceBusy: false, scanSessionId: null, phoneCapture: null, streak: 0, candidate: null, generation: 0, cameraGeneration: 0, cameraStarting: false, scanAbort: null, attendanceSessionCount: 0, movementMode:"automatic" };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let toastTimer;
@@ -17,18 +17,41 @@ function toast(message) {
   toastTimer = setTimeout(() => { $("toast").hidden = true; }, 4500);
 }
 
-async function api(path, method = "GET", data, signal) {
+const connectionIssues=new Set();
+function connectionStatus(channel,failed){
+  if(failed)connectionIssues.add(channel);else connectionIssues.delete(channel);
+  const banner=$('connection-status');banner.hidden=!connectionIssues.size;
+  banner.textContent=navigator.onLine===false?'Network offline. Scanning will resume when the connection returns.':'Connection interrupted. Reconnecting automatically…';
+}
+const transientError=error=>['network_unavailable','server_timeout','server_unavailable'].includes(error.code);
+let refreshingToken=null,signingOut=false;
+async function refreshClientToken(){
+  if(!refreshingToken)refreshingToken=api('/api/client-context').then(context=>{token=context.token;return token;}).finally(()=>refreshingToken=null);
+  return refreshingToken;
+}
+function expiredSession(){
+  if(signingOut)return;signingOut=true;window.sharedRoom?.shutdown();stopCamera();window.location.assign('/?expired=1');
+}
+async function api(path, method = "GET", data, signal, refreshed=false) {
   const controller=new AbortController(), cancel=()=>controller.abort();
-  if(signal?.aborted) controller.abort(); else signal?.addEventListener('abort',cancel,{once:true});
-  const timeout=setTimeout(cancel,15000);
+  if(signal?.aborted)controller.abort();else signal?.addEventListener('abort',cancel,{once:true});
+  const timeout=setTimeout(cancel,10000);
   try {
     const response=await fetch(path,{method,signal:controller.signal,headers:{"Content-Type":"application/json","X-Local-Token":token},...(data?{body:JSON.stringify(data)}:{})});
-    const body=await response.json();
-    if(response.status===401){stopCamera();window.location.assign('/?expired=1');}
-    if(!response.ok) throw Object.assign(new Error(body.error || 'Request failed. Try again.'),{code:body.code});
+    if(response.status===401){expiredSession();throw Object.assign(new Error('Please sign in again.'),{code:'staff_required'});}
+    if([408,500,502,503,504].includes(response.status))throw Object.assign(new Error('The server is reconnecting.'),{code:'server_unavailable'});
+    let body;try{body=await response.json();}catch(error){throw Object.assign(new Error('The server returned an incomplete response.'),{code:'server_unavailable'});}
+    connectionStatus('api',false);
+    if(response.status===403 && body.code==='invalid_token' && !refreshed){
+      await refreshClientToken();if(signal?.aborted)throw Object.assign(new Error('Scan cancelled.'),{code:'cancelled'});
+      return api(path,method,data,signal,true);
+    }
+    if(!response.ok)throw Object.assign(new Error(body.error || 'Request failed. Try again.'),{code:body.code});
     return body;
   }catch(error){
-    if(error.name==='AbortError') throw Object.assign(new Error(signal?.aborted?'Scan cancelled.':'The local server took too long. Check it is running and try again.'),{code:signal?.aborted?'cancelled':'server_timeout'});
+    if(error.name==='AbortError')error=Object.assign(new Error(signal?.aborted?'Scan cancelled.':'The server is taking too long. Reconnecting…'),{code:signal?.aborted?'cancelled':'server_timeout'});
+    if(error instanceof TypeError)error=Object.assign(new Error(method==='GET'?'Connection interrupted. Reconnecting…':'Connection interrupted. Check whether your changes were saved before retrying.'),{code:'network_unavailable'});
+    if(transientError(error))connectionStatus('api',true);
     throw error;
   }finally{clearTimeout(timeout);signal?.removeEventListener('abort',cancel);}
 }
@@ -49,20 +72,20 @@ function updateControls() {
   $("attendance-scan").disabled = state.attendanceBusy || state.enrolling || !state.stream || !state.ready || !state.activeAttendance;
   $("end-session").disabled = state.attendanceBusy || state.enrolling;
   $("attendance-tab").disabled = state.enrolling;
-  $("recognize").disabled = !state.stream || !state.ready || state.people.length === 0 || state.enrolling;
-  $("capture").disabled = !state.stream || !state.ready || state.enrolling || liveTracker.readyStreak < 2;
+  $("recognize").disabled = !state.stream || !state.ready || !state.people.some(person=>person.samples>0) || state.enrolling;
+  $("capture").disabled = !state.stream || !state.ready || state.enrolling || liveTracker.readyStreak < 2 || !$("enroll-person").value;
   $("stop-camera").disabled = !state.stream && !state.cameraStarting;
   $("stop-camera").textContent = state.cameraStarting && !state.stream ? "Cancel connection" : "Turn off camera";
   $("start-camera").disabled = !!state.stream || state.cameraStarting;
   $("person-select").disabled = state.scanning;
   $("verify-tab").disabled = state.enrolling;
   $("enroll-tab").disabled = state.enrolling;
-  $("person-name").disabled = state.enrolling;
+  $("person-name").disabled = $("enroll-person").disabled = state.enrolling;
   $("consent").disabled = state.enrolling;
   $("add-person").disabled = state.enrolling;
   $("laptop-source").disabled = $("iphone-source").disabled = state.enrolling;
   $("iphone-file").disabled = $("iphone-target").disabled = $("iphone-consent").disabled = state.enrolling;
-  $("import-iphone").disabled = state.enrolling || !state.ready || !state.phoneCapture;
+  $("import-iphone").disabled = state.enrolling || !state.ready || !state.phoneCapture || !$("iphone-target").value;
   window.sharedRoom?.renderControls();
 }
 
@@ -118,7 +141,7 @@ async function startCamera() {
     $("camera-dot").classList.remove("off");
     $("camera-label").textContent = "CAMERA CONNECTED";
     $("feed-resolution").textContent = `${$("video").videoWidth} × ${$("video").videoHeight}`;
-    $("enroll-message").textContent = "Enter a name, confirm permission, then capture five samples.";
+    $("enroll-message").textContent = "Select a school record, confirm permission, then capture five samples.";
     result(state.people.length ? "Camera ready" : "No enrolled faces yet", !state.people.length ? "Open Enroll to save your first face." : state.mode === "attendance" ? state.activeAttendance ? "Start attendance scan to mark people present." : "Start a session to take attendance." : "Choose a person or recognize anyone enrolled.");
     for (const track of state.stream.getVideoTracks()) track.onended = () => stopCamera();
     liveTracker.start();
@@ -133,7 +156,7 @@ async function startCamera() {
 
 function stopScan() {
   state.scanAbort?.abort();state.scanAbort=null;
-  state.scanning = false;
+  state.scanning = false;cameraWakeLock?.release().catch(()=>{});cameraWakeLock=null;
   state.scanSessionId = null;
   state.generation++;
   state.streak = 0;
@@ -184,20 +207,27 @@ async function refreshPeople() {
   document.dispatchEvent(new CustomEvent('people-refreshed',{detail:state.people}));
   $("people-count").textContent = state.people.length;
   const chosenClass=$('session-class').value;
-  $('session-class').replaceChildren(new Option('All enrolled students',''));
+  $('session-class').replaceChildren(new Option('All registered classes',''));
   for(const name of [...new Set(state.people.map(p=>p.class_name).filter(Boolean))].sort()) $('session-class').add(new Option(name,name));
   $('session-class').value=chosenClass;
+  const enrollmentTarget=$("enroll-person").value;
+  $("enroll-person").replaceChildren(new Option("Select a registered person", ""));
+  state.people.filter(person=>!person.samples).forEach(person=>$("enroll-person").add(new Option(`${person.name} · ${person.student_id || person.employee_code || "Record "+person.id}`,person.id)));
+  $("enroll-person").value=enrollmentTarget;selectEnrollment();
+  const year=$("session-year").value;$("session-year").replaceChildren(new Option("All years",""));
+  for(const value of [...new Set(state.people.map(person=>person.academic_year).filter(Boolean))].sort())$("session-year").add(new Option(value,value));
+  $("session-year").value=year;
   const phoneTarget = $("iphone-target").value;
-  $("iphone-target").replaceChildren(new Option("New person from capture file", ""));
+  $("iphone-target").replaceChildren(new Option("Select a school record", ""));
   state.people.forEach(person => $("iphone-target").add(new Option(person.name, person.id)));
   if (state.people.some(person => String(person.id) === phoneTarget)) $("iphone-target").value = phoneTarget;
   $("person-select").replaceChildren(new Option("Recognize anyone enrolled", ""));
-  state.people.forEach(person => $("person-select").add(new Option(person.name, person.id)));
+  state.people.filter(person=>person.samples>0).forEach(person => $("person-select").add(new Option(person.name, person.id)));
   if (state.people.some(person => String(person.id) === selected)) $("person-select").value = selected;
   $("people-list").replaceChildren();
   if (!state.people.length) {
     const empty = document.createElement("div");empty.className = "directory-empty";
-    empty.innerHTML = "<strong>No people enrolled yet.</strong><p>Use Enroll to add someone.</p>";
+    empty.innerHTML = "<strong>No school records yet.</strong><p>Add a school record, then enroll their face.</p>";
     $("people-list").append(empty);
   }
   for (const person of state.people) {
@@ -209,12 +239,13 @@ async function refreshPeople() {
     const meta = document.createElement("p");
     meta.textContent = `ID ${String(person.id).padStart(3,"0")} · ${person.samples} samples${person.iphone_samples ? " · iPhone added" : ""} · Added ${new Date(person.created_at).toLocaleDateString(undefined,{month:"short",day:"numeric"})}`;
     info.append(name,meta);
-    const school=document.createElement('p');school.textContent=[person.student_id && `Student ID: ${person.student_id}`,person.class_name].filter(Boolean).join(' · ');info.append(school);
-    const edit=document.createElement('button');edit.className='text-button';edit.textContent='Student details';edit.setAttribute('aria-label',`Student details for ${person.name}`);edit.onclick=()=>openStudentProfile(person);
-    const status = document.createElement("span");status.className = "person-status";status.innerHTML = '<span class="green-dot"></span> ENROLLED';
+    const school=document.createElement('p');school.textContent=[person.person_type==='staff' ? `Staff · ${person.employee_code}` : person.student_id && `Admission: ${person.student_id}`,person.class_name,person.academic_year].filter(Boolean).join(' · ');info.append(school);
+    const edit=document.createElement('button');edit.className='text-button';edit.textContent='Edit details';edit.setAttribute('aria-label',`Edit details for ${person.name}`);edit.onclick=()=>openStudentProfile(person);
+    const status = document.createElement("span");status.className = "person-status";status.textContent=person.samples ? 'FACE ENROLLED' : 'AWAITING FACE';
     const remove = document.createElement("button");remove.className = "text-button";remove.textContent = "Remove";remove.setAttribute("aria-label",`Remove ${person.name}`);
     remove.onclick = () => askDelete(person);
-    row.append(avatar,info,status,edit,remove);$("people-list").append(row);
+    const capture=document.createElement('button');capture.className='text-button';capture.textContent='Enroll face';capture.hidden=person.samples>0;capture.onclick=()=>{setMode('enroll');setSource('laptop');$('enroll-person').value=String(person.id);selectEnrollment();$('enroll-panel').scrollIntoView({behavior:'smooth',block:'center'});};
+    row.append(avatar,info,status,capture,edit,remove);$("people-list").append(row);
   }
   updateControls();
 }
@@ -222,7 +253,7 @@ async function refreshPeople() {
 async function scan(attendanceSessionId = null, sharedExecution = false) {
   if(attendanceSessionId && !sharedExecution && window.sharedRoom)return window.sharedRoom.toggleScan();
   if (state.scanning) { const attendanceScan = !!state.scanSessionId; stopScan();result(attendanceScan ? "Attendance scan paused" : "Recognition paused", "Start again when you’re ready.");return; }
-  state.scanning = true;
+  state.scanning = true;maintainCameraAwake();
   const scanAbort=new AbortController();state.scanAbort=scanAbort;
   state.scanSessionId = attendanceSessionId;
   const scannerId = sharedExecution ? window.sharedRoom.snapshot.scanner_id : crypto.randomUUID();
@@ -230,6 +261,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
   const group = !!attendanceSessionId || !$("person-select").value;
   const groupStreaks = new Map();
   const generation = ++state.generation;
+  let failures=0;
   $("recognize").textContent = "Pause recognition";
   if (attendanceSessionId) $("attendance-scan").textContent = "Pause attendance scan";
   $("feed-label").textContent = attendanceSessionId ? "TAKING ATTENDANCE" : "RECOGNIZING";
@@ -240,6 +272,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       const capturedAt=performance.now(),image=frame();
       const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {...sharedContext,attendance_session_id: attendanceSessionId, scanner_id: scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value} : {}) }, scanAbort.signal);
       if (!state.scanning || generation !== state.generation) break;
+      failures=0;
       if(group) {liveTracker.accept(data,image,capturedAt);await showGroupResults(data,groupStreaks,attendanceSessionId);continue;}
       if (data.status === "matched") {
         state.streak = state.candidate === data.person.id ? state.streak + 1 : 1;
@@ -262,6 +295,10 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       }
     } catch (error) {
       if (!state.scanning || generation !== state.generation) break;
+      if(transientError(error)){
+        clearBox();groupStreaks.clear();result('Reconnecting…','Scan remains enabled. Waiting for the server.');
+        await sleep(Math.min(15000,500*2**Math.min(++failures,5)));continue;
+      }
       if(error.code==='shared_scan_stopped'){stopScan();result("Shared scan paused","Shared controls paused or changed the scan.");break;}
       state.streak = 0;state.candidate = null;clearBox();
       groupStreaks.clear();showCameraNames([]);$("scan-face-results").replaceChildren();$("scan-face-results").hidden=true;
@@ -298,16 +335,17 @@ async function showGroupResults(data,streaks,sessionId) {
   liveTracker.highlightGroup(highlights);
   const visible=holder.children.length;
   result(visible?`${confirmed} ${sessionId?'movement records':'recognized'}`:'Ready for the next person',visible?`${confirming} confirming · ${visible-confirmed-confirming} need review`:state.movementMode==='automatic' ? 'Waiting for an enrolled person to cross the line.' : 'Waiting for an enrolled person.',confirmed?'matched':'');
-  if(newlyPresent.length) {toast(newlyPresent.join(', '));refreshAttendance(sessionId).catch(error=>toast(error.message));}
+  if(newlyPresent.length) {toast(newlyPresent.join(', '));refreshAttendance(sessionId).catch(error=>{if(!transientError(error))toast(error.message);});}
   // Requests remain sequential; attendance resumes shortly after each response.
-  await sleep(sessionId ? 40 : 650);
+  await sleep(sessionId ? (data.face_count ? 80 : 600) : 650);
 }
 
 async function enroll(event) {
   event.preventDefault();
   if (state.enrolling || !state.stream) return;
   const name = $("person-name").value.trim();
-  if (!name || !$("consent").checked) return;
+  const personId=Number($("enroll-person").value);
+  if (!name || !personId || !$("consent").checked) return;
   stopScan();state.enrolling = true;cancelEnrollment = false;$("cancel-capture").hidden = false;updateControls();
   const samples = [];
   const markers = [...document.querySelectorAll(".samples span")];
@@ -336,7 +374,7 @@ async function enroll(event) {
     if (cancelEnrollment || !state.stream) throw Object.assign(new Error("Capture cancelled. Your face patterns were not saved."), {code: "cancelled"});
     $("cancel-capture").hidden = true;
     $("enroll-message").textContent="Saving face patterns to your local database…";
-    const saved = await api("/api/enroll", "POST", {name,consent:true,images:samples});
+    const saved = await api("/api/enroll", "POST", {name,person_id:personId,consent:true,images:samples});
     await refreshPeople();
     $("person-name").value="";$("consent").checked=false;
     $("enroll-message").textContent=`${saved.person.name} is enrolled. You can now recognize their face.`;
@@ -429,11 +467,18 @@ for (const mode of ["attendance", "verify", "enroll"]) {
   });
 }
 $("person-select").onchange=()=>{stopScan();result("Ready to verify","Start recognition to check the selected identity.");};
-$("add-person").onclick=()=>{setMode("enroll");setSource("laptop");$("enroll-tab").scrollIntoView({behavior:"smooth",block:"center"});$("person-name").focus();};
+$("add-person").onclick=()=>openStudentProfile();
+function selectEnrollment(){const person=state.people.find(person=>String(person.id)===$("enroll-person").value);$("person-name").value=person?.name || "";updateControls();}
+$("enroll-person").onchange=selectEnrollment;
 
 window.addEventListener("pagehide",stopCamera);
-document.addEventListener("visibilitychange",()=>{if(document.hidden && state.scanning){const attendanceScan=!!state.scanSessionId;stopScan();result(attendanceScan ? "Attendance scan paused" : "Recognition paused","Start again when you return.");}});
-(async()=>{
+let cameraWakeLock=null;
+async function maintainCameraAwake(){
+  if(!navigator.wakeLock || document.hidden || !state.scanning || cameraWakeLock)return;
+  try{cameraWakeLock=await navigator.wakeLock.request('screen');cameraWakeLock.addEventListener('release',()=>cameraWakeLock=null);}catch(error){}
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)maintainCameraAwake();});
+async function initializeApp(){
   $("camera-dot").classList.add("off");
   try {
     const status=await api("/api/status");state.ready=status.models_ready;
@@ -442,9 +487,13 @@ document.addEventListener("visibilitychange",()=>{if(document.hidden && state.sc
     if(!state.ready){toast("Face models are missing. Run python scripts/download_models.py.");result("Setup needed","Download the face models, then reload this page.","warning");}
     else if(state.activeAttendance) result("Session in progress","Enable the camera and start attendance scan to continue.");
     else if(state.people.length) result("Ready to take attendance","Name your session, then click Start session.");
-  }catch(error){toast(`Could not connect to the local server: ${error.message}`);result("Server unavailable","Start the app and reload this page.","warning");}
+  }catch(error){
+    if(transientError(error)){result('Reconnecting…','Waiting for the attendance laptop.');setTimeout(initializeApp,5000);}
+    else{toast(error.message);result('Setup needs attention',error.message,'warning');}
+  }
   updateControls();
-})();
+}
+initializeApp();
 
 function setSource(source) {
   if (state.enrolling) return;
@@ -469,7 +518,7 @@ $("iphone-file").onchange = async () => {
     if (capture?.format !== "identiq.capture" || capture.version !== 1 || typeof capture.name !== "string") throw new Error("Choose a capture file exported by the Identiq iPhone app.");
     state.phoneCapture = capture;
     $("iphone-file-detail").textContent = `${capture.name.slice(0,80)} · ${Array.isArray(capture.samples) ? capture.samples.length : 0} samples`;
-    $("iphone-message").textContent = "Ready to import. Choose an existing person to add phone samples, or create a new enrollment.";
+    $("iphone-message").textContent = "Ready to import. Select their school record to save phone samples.";
   } catch (error) {
     $("iphone-file-detail").textContent = "No valid file selected.";
     $("iphone-message").textContent = error.message;
@@ -478,7 +527,7 @@ $("iphone-file").onchange = async () => {
 };
 $("iphone-form").onsubmit = async event => {
   event.preventDefault();
-  if (!state.phoneCapture || !$("iphone-consent").checked || state.enrolling) return;
+  if (!state.phoneCapture || !$("iphone-target").value || !$("iphone-consent").checked || state.enrolling) return;
   stopScan(); state.enrolling = true; updateControls();
   $("iphone-message").classList.remove("error");
   $("iphone-message").textContent = "Checking face samples and saving patterns…";
@@ -545,13 +594,13 @@ function renderRoster(detail=state.viewedAttendance){
     const head = document.createElement('thead');head.innerHTML='<tr><th>Person</th><th>Status</th><th>Check-in</th><th>Check-out</th><th>Campus record</th><th>Staff action</th></tr>';table.append(head);
     const body = document.createElement('tbody');
     const query=$('roster-search').value.trim().toLocaleLowerCase(),filter=$('roster-filter').value;
-    const visible=detail.roster.filter(person=>(!query || [person.name,person.student_id,person.class_name].join(' ').toLocaleLowerCase().includes(query)) && (!filter || person.status===filter));
+    const visible=detail.roster.filter(person=>(!query || [person.name,person.student_id,person.employee_code,person.class_name,person.academic_year].join(' ').toLocaleLowerCase().includes(query)) && (!filter || person.status===filter));
     $('roster-matches').textContent=`${visible.length} of ${detail.roster.length} people`;
     for (const person of visible) {
       const row = document.createElement('tr');row.dataset.recordId = person.id;
       const name = document.createElement('td');name.textContent = person.name;
       const source = document.createElement('span');source.className='attendance-source';source.textContent=person.method === 'manual' ? 'Staff recorded' : person.method === 'camera' ? 'Camera check-in' : person.person_id === null ? 'Enrollment removed' : '';
-      const school=document.createElement('span');school.className='attendance-source';school.textContent=[person.student_id,person.class_name].filter(Boolean).join(' · ');name.append(school,source);
+      const school=document.createElement('span');school.className='attendance-source';school.textContent=[person.student_id || person.employee_code,person.class_name,person.academic_year].filter(Boolean).join(' · ');name.append(school,source);
       const status = document.createElement('td');const select = document.createElement('select');select.className=person.status;select.setAttribute('aria-label',`Attendance for ${person.name}`);
       for (const [value,label] of [['present','Present'],['absent','Absent'],...(detail.status === 'active' ? [['pending','Not seen yet']] : [])]) select.add(new Option(label,value));
       select.value=person.status;select.onchange=()=>correctAttendance(detail.id,person.id,select.value);
@@ -577,7 +626,7 @@ $('session-form').onsubmit = async event => {
   if (state.attendanceBusy || state.activeAttendance) return;
   state.attendanceBusy=true;updateControls();
   try {
-    const started=(await api('/api/attendance/sessions','POST',{name:$('session-name').value.trim(),class_name:$('session-class').value})).session;
+    const started=(await api('/api/attendance/sessions','POST',{name:$('session-name').value.trim(),class_name:$('session-class').value,person_type:$('session-type').value,academic_year:$('session-year').value})).session;
     await refreshAttendance(started.id);
     result('Attendance started',state.stream ? 'Start attendance scan to mark people present.' : 'Enable the camera, then start attendance scan.');
     toast(`${started.name} started.`);
@@ -625,8 +674,8 @@ $('confirm-end-session').onclick=async()=>{
   finally{state.attendanceBusy=false;$('confirm-end-session').disabled=false;updateControls();}
 };
 setInterval(()=>{
-  if (!document.hidden && !attendancePolling && !state.attendanceBusy && !state.enrolling && !document.activeElement?.matches('#attendance-roster select, #session-history')) {attendancePolling=true;refreshAttendance().catch(()=>{}).finally(()=>attendancePolling=false);}
-},5000);
+  if (!window.sharedRoom?.connected && !document.hidden && !attendancePolling && !state.attendanceBusy && !state.enrolling && !document.activeElement?.matches('#attendance-roster select, #session-history')) {attendancePolling=true;refreshAttendance().catch(()=>{}).finally(()=>attendancePolling=false);}
+},15000);
 
 $('delete-attendance').onclick=()=>{
   if(state.attendanceBusy || state.enrolling)return;
@@ -669,3 +718,6 @@ $('staff-movement-form').onsubmit=async event=>{
   catch(error){$('staff-movement-error').textContent=error.message;$('staff-movement-error').hidden=false;}
   finally{state.attendanceBusy=false;$('confirm-staff-movement').disabled=false;updateControls();}
 };
+
+$('iphone-target').onchange=updateControls;
+$('session-type').onchange=()=>{const staff=$('session-type').value==='staff';$('session-class').disabled=$('session-year').disabled=staff;if(staff){$('session-class').value='';$('session-year').value='';}};

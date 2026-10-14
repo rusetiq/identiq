@@ -217,13 +217,15 @@ class Store:
                 );
             """)
             people_columns={row['name'] for row in db.execute('PRAGMA table_info(people)')}
-            for column in ('student_id','class_name'):
+            for column in ('student_id','class_name','grade','section','academic_year','employee_code'):
                 if column not in people_columns:db.execute(f"ALTER TABLE people ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            if 'person_type' not in people_columns:db.execute("ALTER TABLE people ADD COLUMN person_type TEXT NOT NULL DEFAULT 'student'")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS school_student_id ON people(student_id COLLATE NOCASE) WHERE student_id<>''")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS school_employee_code ON people(employee_code COLLATE NOCASE) WHERE employee_code<>''")
             session_columns={row['name'] for row in db.execute('PRAGMA table_info(attendance_sessions)')}
             if 'class_name' not in session_columns:db.execute("ALTER TABLE attendance_sessions ADD COLUMN class_name TEXT NOT NULL DEFAULT ''")
             attendance_columns={row['name'] for row in db.execute('PRAGMA table_info(attendance_records)')}
-            for column in ('student_id','class_name'):
+            for column in ('student_id','class_name','person_type','grade','section','academic_year','employee_code'):
                 if column not in attendance_columns:db.execute(f"ALTER TABLE attendance_records ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             for column in ('checked_in_at','checked_out_at'):
                 if column not in attendance_columns: db.execute(f'ALTER TABLE attendance_records ADD COLUMN {column} TEXT')
@@ -270,9 +272,42 @@ class Store:
         with self.connect() as db:
             return [dict(row) for row in db.execute("""
                 SELECT p.*, count(e.person_id) AS samples,
-                    sum(e.source='iphone_truedepth') AS iphone_samples FROM people p
-                JOIN embeddings e ON p.id=e.person_id GROUP BY p.id ORDER BY p.id DESC
+                    coalesce(sum(e.source='iphone_truedepth'),0) AS iphone_samples FROM people p
+                LEFT JOIN embeddings e ON p.id=e.person_id GROUP BY p.id ORDER BY p.id DESC
             """)]
+
+    def save_profile(self, data, person_id=None):
+        fields=('name','person_type','student_id','grade','section','academic_year','employee_code','class_name')
+        with self.lock,self.connect() as db:
+            previous=dict(db.execute('SELECT * FROM people WHERE id=?',(person_id,)).fetchone() or {}) if person_id else {}
+            if person_id and not previous:raise FaceError('person_missing','That school record was not found.')
+            values={field:data.get(field,previous.get(field,'')) for field in fields}
+            values['person_type']=data.get('person_type',previous.get('person_type','student'))
+            if 'admission_number' in data:values['student_id']=data['admission_number']
+            for field,value in values.items():
+                if not isinstance(value,str) or len(value)>80 or any(ord(c)<32 for c in value):
+                    raise FaceError('invalid_profile','Use school details up to 80 characters, without control characters.')
+                values[field]=value.strip()
+            if values['person_type'] not in ('student','staff'):raise FaceError('invalid_profile','Choose Student or Staff.')
+            required=('name','student_id','grade','section','academic_year') if values['person_type']=='student' else ('name','employee_code')
+            if any(not values[field] for field in required):raise FaceError('invalid_profile','Complete the required school details.')
+            if values['person_type']=='student':
+                values['employee_code']=''
+                values['class_name']=f"{values['grade']} {values['section']}"
+                if len(values['class_name'])>80:raise FaceError('invalid_profile','Grade and section together must fit within 80 characters.')
+            else:
+                for field in ('student_id','grade','section','academic_year','class_name'):values[field]=''
+                has_parent_table=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='parent_access'").fetchone()
+                if person_id and has_parent_table and db.execute('SELECT 1 FROM parent_access WHERE person_id=? AND revoked_at IS NULL',(person_id,)).fetchone():
+                    raise FaceError('parent_linked','Revoke this student’s parent access before changing them to staff.')
+            try:
+                if person_id:
+                    db.execute('UPDATE people SET '+','.join(field+'=?' for field in fields)+' WHERE id=?',(*[values[f] for f in fields],person_id))
+                else:
+                    person_id=db.execute('INSERT INTO people('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',[values[f] for f in fields]).lastrowid
+            except sqlite3.IntegrityError as error:
+                raise FaceError('duplicate_school_id','That admission number or employee code is already assigned.') from error
+        return next(person for person in self.people() if person['id']==person_id)
 
     def update_student_profile(self, person_id, student_id, class_name):
         for value in (student_id,class_name):
@@ -320,12 +355,15 @@ class Store:
                 raise FaceError("inconsistent_faces", "Samples do not show the same person clearly. Start again.")
             candidates = self.candidates(centroid)
             if person_id is not None:
+                with self.connect() as db:
+                    registered=db.execute('SELECT name FROM people WHERE id=?',(person_id,)).fetchone()
+                if registered is None:raise FaceError('person_missing','That school record no longer exists.')
                 existing = next((p for p in candidates if p["id"] == person_id), None)
-                if existing is None:
-                    raise FaceError("person_missing", "That enrollment no longer exists.")
-                if (existing["similarity"] < THRESHOLD or candidates[0]["id"] != person_id or
+                if existing is None and candidates and candidates[0]['similarity']>=THRESHOLD:
+                    raise FaceError('duplicate_face',f"This face is already enrolled as {candidates[0]['name']}.")
+                if existing is not None and (existing["similarity"] < THRESHOLD or candidates[0]["id"] != person_id or
                         (len(candidates) > 1 and candidates[0]["similarity"] - candidates[1]["similarity"] < MARGIN)):
-                    raise FaceError("identity_mismatch", "Phone samples do not clearly match the selected person. No patterns were added.")
+                    raise FaceError("identity_mismatch", "Samples do not clearly match the selected person. No patterns were added.")
             elif candidates and candidates[0]["similarity"] >= THRESHOLD:
                 raise FaceError("duplicate_face", f"This face is already enrolled as {candidates[0]['name']}.")
             with self.connect() as db:
@@ -333,7 +371,7 @@ class Store:
                     cursor = db.execute("INSERT INTO people (name) VALUES (?)", (name,))
                     person_id = cursor.lastrowid
                 else:
-                    name = existing["name"]
+                    name = registered['name']
                     if db.execute("SELECT count(*) FROM embeddings WHERE person_id=? AND source=?", (person_id, source)).fetchone()[0] >= SAMPLES:
                         raise FaceError("phone_already_added", "This person already has phone samples. Remove and enroll again to replace them.")
                 db.executemany("INSERT INTO embeddings (person_id, vector, source) VALUES (?, ?, ?)",

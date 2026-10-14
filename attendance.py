@@ -70,21 +70,24 @@ class Attendance:
         result["counts"]["total"] = len(roster)
         return result
 
-    def start(self, name, class_name=''):
+    def start(self, name, class_name='', person_type='',academic_year=''):
         name = valid_name(name)
         if not isinstance(class_name,str) or len(class_name)>80:raise FaceError('invalid_class','Choose a valid class.')
         class_name=class_name.strip()
+        if person_type not in ('','student','staff') or not isinstance(academic_year,str) or len(academic_year)>80:
+            raise FaceError('invalid_roster','Choose a valid school roster.')
         with self.store.lock, self.store.connect() as db:
             if db.execute("SELECT 1 FROM attendance_sessions WHERE status='active'").fetchone():
                 raise FaceError("session_active", "Finish the current session before starting another.")
-            people = db.execute("""SELECT DISTINCT p.id,p.name,p.student_id,p.class_name FROM people p
-                JOIN embeddings e ON e.person_id=p.id WHERE (?='' OR p.class_name=?) ORDER BY p.id""",
-                (class_name,class_name)).fetchall()
+            people = db.execute("""SELECT p.* FROM people p WHERE (?='' OR p.class_name=?)
+                AND (?='' OR p.person_type=?) AND (?='' OR p.academic_year=?) ORDER BY p.id""",
+                (class_name,class_name,person_type,person_type,academic_year,academic_year)).fetchall()
             if not people:
-                raise FaceError("empty_roster", "Enroll at least one person before starting attendance.")
+                raise FaceError("empty_roster", "Add at least one school record matching this roster first.")
             session_id = db.execute("INSERT INTO attendance_sessions(name,class_name) VALUES(?,?)", (name,class_name)).lastrowid
-            db.executemany("INSERT INTO attendance_records(session_id,person_id,name,student_id,class_name) VALUES(?,?,?,?,?)",
-                           [(session_id, person["id"], person["name"],person["student_id"],person["class_name"]) for person in people])
+            fields=('name','student_id','class_name','person_type','grade','section','academic_year','employee_code')
+            db.executemany('INSERT INTO attendance_records(session_id,person_id,'+','.join(fields)+') VALUES('+','.join('?' for _ in range(10))+')',
+                           [(session_id,person['id'],*[person[field] for field in fields]) for person in people])
         return self.detail(session_id)
 
     def ensure_active(self, session_id, db=None):
@@ -263,11 +266,11 @@ class Attendance:
         session = self.detail(session_id)
         stream = io.StringIO(newline="")
         writer = csv.writer(stream)
-        writer.writerow(["Session", "Started (UTC)", "Ended (UTC)", "Name", "Status", "First seen (UTC)", "Last seen (UTC)", "Source", "Check-in (UTC)", "Check-out (UTC)", "Campus status", "Student ID", "Class"])
+        writer.writerow(["Session", "Started (UTC)", "Ended (UTC)", "Name", "Status", "First seen (UTC)", "Last seen (UTC)", "Source", "Check-in (UTC)", "Check-out (UTC)", "Campus status", "Admission number", "Class", "Record type", "Grade", "Section", "Academic year", "Employee code"])
         def safe(value):
             text = str(value or "")
             return "'"+text if text.startswith(("=", "+", "-", "@", "\t", "\r")) else text
         for record in session["roster"]:
             writer.writerow([safe(value) for value in (session["name"], session["started_at"], session["ended_at"], record["name"],
-                record["status"], record["first_seen_at"], record["last_seen_at"], record["method"],record["checked_in_at"],record["checked_out_at"],record["campus_state"],record["student_id"],record["class_name"])])
+                record["status"], record["first_seen_at"], record["last_seen_at"], record["method"],record["checked_in_at"],record["checked_out_at"],record["campus_state"],record["student_id"],record["class_name"],record["person_type"],record["grade"],record["section"],record["academic_year"],record["employee_code"])])
         return stream.getvalue()

@@ -2,14 +2,13 @@
 const guardianElement=id=>document.getElementById(id);
 let guardianBusy=false;
 async function guardianApi(path,method='GET',body){
-  const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-Local-Token':document.querySelector('meta[name="local-token"]').content},...(body ? {body:JSON.stringify(body)} : {})});
-  const data=await response.json();if(!response.ok) throw new Error(data.error || 'Request failed.');return data;
+  return api(path,method,body);
 }
 function guardianError(error){guardianElement('parent-admin-error').textContent=error.message;guardianElement('parent-admin-error').hidden=false;}
 function setGuardianBusy(busy){guardianBusy=busy;guardianElement('create-parent-link').disabled=busy;guardianElement('guardian-name').disabled=busy;guardianElement('guardian-student').disabled=busy;guardianElement('guardian-login-id').disabled=busy;guardianElement('guardian-password').disabled=busy;document.querySelectorAll('#parent-link-list button').forEach(button=>button.disabled=busy);}
 document.addEventListener('people-refreshed',event=>{
   const select=guardianElement('guardian-student'),selected=select.value;select.replaceChildren(new Option('Choose a student',''));
-  event.detail.forEach(person=>select.add(new Option(`${person.name} · ID ${person.id}`,person.id)));
+  event.detail.filter(person=>person.person_type!=='staff').forEach(person=>select.add(new Option(`${person.name} · ID ${person.id}`,person.id)));
   if(event.detail.some(person=>String(person.id)===selected)) select.value=selected;
   loadGuardianLinks().catch(guardianError);
 });

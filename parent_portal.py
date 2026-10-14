@@ -156,7 +156,7 @@ class PortalAccess:
             raise FaceError('invalid_person', 'Choose an enrolled student.')
         login_id=self.valid_login_id(login_id);password=self.valid_password(password)
         with self.store.lock, self.store.connect() as db:
-            person = db.execute('SELECT name FROM people WHERE id=?', (person_id,)).fetchone()
+            person = db.execute("SELECT name FROM people WHERE id=? AND person_type='student'", (person_id,)).fetchone()
             if person is None:
                 raise FaceError('person_missing', 'That student is no longer enrolled.')
             try:parent_id=db.execute('INSERT INTO parent_access(name,person_id,code_hash,login_id,password_hash) VALUES(?,?,?,?,?)',

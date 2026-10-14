@@ -38,3 +38,5 @@
 .camera-expanded .camera-name strong{font-size:56px;font-size:clamp(44px,7vw,88px);font-weight:750;line-height:1.1}
 .camera-expanded .camera-name span{font-size:24px;font-size:clamp(20px,3vw,34px);line-height:1.25}
 @media(max-width:530px){.camera-expanded .camera-names{grid-template-columns:1fr;bottom:108px;max-height:45%}.camera-expanded .camera-name strong{font-size:40px;font-size:clamp(34px,8vw,52px)}.camera-expanded .camera-name span{font-size:20px}}
+
+.connection-status{position:sticky;top:0;z-index:100;background:#fff2cf;color:#594015;padding:12px 20px;margin:0;text-align:center;font-weight:600}.connection-status[hidden]{display:none}#student-profile-dialog{max-height:90dvh;overflow:auto}#student-profile-form input,#student-profile-form select{margin-bottom:12px}

@@ -1,6 +1,6 @@
 # Identiq
 
-A local laptop-camera attendance and face recognition app. Enroll someone's name and five face samples, then scan them to mark attendance. Names, face patterns and attendance history are stored in SQLite on this laptop.
+A local laptop-camera attendance and face recognition app. Register students and staff, enroll five face samples against their school record, then scan to record arrivals and departures. Names, face patterns and attendance history are stored in SQLite on this laptop.
 
 ## Start
 
@@ -17,8 +17,8 @@ The first run creates `.venv`, installs the Python dependencies, and downloads a
 ## Use
 
 1. Enable your camera. Use even lighting and keep faces large enough to see clearly. Enrollment requires one person; attendance supports up to eight together.
-2. Select **Enroll → Laptop camera**, enter their name, and confirm their permission. Click **Capture & enroll**. Hold still for the first samples and gently turn your head for the later ones.
-3. Set student IDs and classes using **Student details** in the directory. Select **Attendance**, name the school day, choose all students or one class and click **Start session**. The roster saves its student details at that moment.
+2. Choose **School directory → Add school record**. Students need admission number, full name, grade, section and academic year. Staff need employee code and full name. These records are saved before face capture. Choose **Enroll face** on their record, confirm permission and select **Capture & enroll**. Hold still for the first samples and gently turn your head for the later ones.
+3. Select **Attendance**, name the school day, choose students, staff or everyone, and optionally filter students by academic year and class. Click **Start session**. Registered people are included even before face enrollment, so staff can record their attendance manually. The roster saves school details at that moment; later profile edits do not change historical records.
 4. Choose **Automatic walking direction**, **Camera check-in** or **Camera check-out**, then start the scan. Automatic mode requires an enrolled face to cross the visible center line; configure the line and check-in direction using the mirrored preview. Camera modes record a movement on one successful match. Up to eight enrolled faces are handled together. Disappearing from view does not record a departure.
 5. Use a student’s **Check in / Check out** buttons for staff-recorded movements with a required note. Check-out requires a recorded arrival; repeated arrivals or departures do not duplicate events. Re-entry is supported, and the movement history keeps previous visits. **End session → End & save** marks pending students absent and flags check-ins without departure; it does not fabricate check-out times. Review history, correct attendance and export timestamps, campus state, student ID and class as CSV.
 
@@ -38,7 +38,7 @@ From the staff dashboard, use **Parent access** below the people list: enter the
 
 Staff routes require a separate staff session, including roster APIs and CSV exports. Passwords use salted scrypt hashes; session tokens use SHA-256 hashes. Login IDs are case-insensitive; passwords preserve case and spaces. Sessions expire after 12 hours, use HttpOnly/SameSite cookies and persist across server restarts. Login attempts are limited. Changing credentials invalidates the affected sessions. Sign out of the staff area before letting another person use the same browser. The initial staff credential file is never served by the app. If the staff password is forgotten, the laptop owner can run `.venv/bin/python scripts/reset_staff_login.py` to set a new ID and password using hidden terminal input.
 
-**This remains a local prototype:** localhost on a parent's phone refers to their phone, not this laptop. Remote parent access requires a separately configured HTTPS deployment and a reachable server. The current server still accepts only localhost and has not been exposed publicly. Portal codes grant attendance access, so verify guardian relationships before issuing them.
+**This remains a local prototype:** localhost on a parent’s phone refers to their phone, not this laptop. Use the configured Wi-Fi address for devices on that network. Internet access requires a separately configured HTTPS deployment. Verify guardian relationships before creating parent accounts.
 
 ## Live face tracking and groups
 
@@ -101,7 +101,7 @@ Open the printed staff URL or `/parents` on a device connected to the same netwo
 
 ## Shared camera and HTTP Wi-Fi access
 
-Use `./run-network.sh --address YOUR-LAN-IP --http --port 8080` to run one shared server on both that LAN IP and `http://localhost:8080`. On the laptop, sign in at localhost, enable the camera, and click **Share this camera**. On another device, sign in at `http://YOUR-LAN-IP:8080`; it receives the camera preview and can start, pause or configure the shared scan. Only the camera source submits recognition frames. All connected staff tabs receive movement updates. Parents have no access to the feed or controls. The source tab must remain open; disconnecting it or losing frames for five seconds pauses the scan and clears the shared feed. Reconnecting does not silently reclaim the camera.
+Use `./run-network.sh --address YOUR-LAN-IP --http --port 8080` to run one shared server on both that LAN IP and `http://localhost:8080`. On the laptop, sign in at localhost, enable the camera, and click **Share this camera**. On another device, sign in at `http://YOUR-LAN-IP:8080`; it receives the camera preview and can start, pause or configure the shared scan. Only the camera source submits recognition frames. All connected staff tabs receive movement updates. Parents have no access to the feed or controls. The source tab must remain open; losing frames for five seconds pauses writes and clears the shared feed. While the camera page remains open, it reconnects using its private source key and resumes the same attendance session once fresh frames return. Manual pauses, mode changes, camera shutdown and session end cancel automatic scanning. The source has a 30-second recovery window before another staff camera may claim the feed.
 
 Controls and a small latest-frame JPEG preview use authenticated same-origin WebSockets. There is one in-memory source and no saved camera video. Preview frames are capped at about five per second and slow viewers receive the latest frame, rather than an unbounded queue. This shared state belongs to one server process; run the LAN and localhost listeners with the command above, rather than starting separate servers. The ordinary attendance polling remains a fallback.
 
@@ -116,3 +116,11 @@ Run `./run-network.sh --address YOUR-LAN-IP --http --port 8080 --https-port 8443
 The camera requests up to 1920×1080 when the device supports it. Attendance frames preserve up to 1600 pixels on their longest side, and group detection uses a 960-pixel pass plus a 1280-pixel pass when faces are small or missing. Detections from both passes are merged to avoid duplicate face results. Group recognition accepts clear faces with at least 64 pixels on their shorter side without requiring them to occupy 10% of the scene. Enrollment and selected-person verification retain the closer-face requirement. Similarity and ambiguity thresholds are unchanged. Distance still depends on the camera’s actual resolution, focus and lighting; this does not establish long-distance recognition accuracy.
 
 The HTTP network command now also starts the tablet HTTPS listener on port 8443 by default. Use `--https-port` to choose a different HTTPS port. **Fullscreen camera** requests native browser fullscreen from the button tap, with an expanded-page fallback where the browser does not support it. Esc, the system exit gesture and the Exit fullscreen button restore the normal layout. Fullscreen face labels and attendance names use larger type for tablet viewing.
+
+## connection recovery
+
+The camera page shows one connection notice instead of repeated network-error popups. Requests have a deadline; scanning and WebSockets retry with bounded exponential backoff. Old scan results are rejected after the source or session changes. A server restart refreshes the page’s request token without requiring a reload; an expired staff login still requires sign-in. No camera images are stored or queued for later attendance replay. Attendance cannot be recorded during an outage.
+
+Empty scenes use fewer recognition requests, previews upload less often without viewers, and connected staff tabs receive attendance changes over WebSockets instead of redundant polling. Starting scanning requests a screen wake lock where supported. Keep the designated camera page open and the device unlocked: a closed browser, locked device, suspended OS or expired login still needs attention.
+
+The network launcher restarts an unexpected server exit using the original IP address. Ctrl+C stops it. Startup failures are limited to three attempts so an invalid address or occupied port does not loop forever. A stalled HTTPS handshake times out in its own worker and cannot block other devices. When the laptop’s Wi-Fi address changes, restart with the new approved address and trust its new public certificate on the tablet.

@@ -7,7 +7,8 @@ import subprocess
 import sys
 import tempfile
 import threading
-from werkzeug.serving import make_server
+import ssl
+from werkzeug.serving import make_server, ThreadedWSGIServer
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -16,6 +17,23 @@ from app import create_app
 
 import shutil
 import socket
+
+
+class CameraHTTPSServer(ThreadedWSGIServer):
+    """Keep slow TLS handshakes out of the listener's accept loop."""
+    def __init__(self, host, port, app, certificate, key):
+        super().__init__(host,port,app)
+        self.ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ssl_context.load_cert_chain(certificate,key)
+
+    def process_request_thread(self, connection, address):
+        try:
+            connection.settimeout(8)
+            connection=self.ssl_context.wrap_socket(connection,server_side=True)
+            connection.settimeout(None)
+        except (ssl.SSLError,OSError):
+            connection.close();return
+        super().process_request_thread(connection,address)
 
 
 def lan_address(value=None):
@@ -149,7 +167,7 @@ def main():
         if args.https_port:
             certificate,key=certificate_for(address)
             app.config['NETWORK_CERTIFICATE']=str(certificate)
-            secure=make_server(address,args.https_port,app,threaded=True,ssl_context=(str(certificate),str(key)))
+            secure=CameraHTTPSServer(address,args.https_port,app,str(certificate),str(key))
         threading.Thread(target=local.serve_forever,daemon=True).start()
         if standard:
             threading.Thread(target=standard.serve_forever,daemon=True).start()
@@ -172,7 +190,7 @@ def main():
         print(f'Network staff area: https://{address}:{args.port}/',flush=True)
         print(f'Parent portal: https://{address}:{args.port}/parents',flush=True)
         print(f'Public certificate to trust on your devices: {certificate}',flush=True)
-        app.run(host=address,port=args.port,debug=False,threaded=True,ssl_context=(str(certificate),str(key)))
+        CameraHTTPSServer(address,args.port,app,str(certificate),str(key)).serve_forever()
 
 
 

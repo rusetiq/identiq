@@ -127,19 +127,21 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             client=shared.connect();last_state=None;last_frame=-1;last_auth=0
             while True:
                 if time.monotonic()-last_auth>=1:
-                    if not access.authenticate(request.cookies.get(cookie_name('staff')),'staff'):break
+                    if not access.authenticate(request.cookies.get(cookie_name('staff')),'staff'):
+                        ws.send(json.dumps({'type':'auth_required'}));break
                     last_auth=time.monotonic()
-                incoming=ws.receive(timeout=.1)
+                incoming=ws.receive(timeout=.2 if shared.ready else 1)
                 if incoming is not None:
                     try:
                         if isinstance(incoming,bytes):shared.publish(client,incoming)
                         elif len(incoming)<=8192:
                             message=json.loads(incoming)
                             if not isinstance(message,dict):raise FaceError('invalid_shared_command','Send a camera action.')
-                            shared.command(client,message)
+                            if message.get('type')=='heartbeat':ws.send(json.dumps({'type':'pong'}))
+                            else:shared.command(client,message)
                         else:raise FaceError('invalid_shared_command','Camera action is too large.')
                     except (ValueError,FaceError) as error:
-                        ws.send(json.dumps({'type':'error','message':str(error)}))
+                        ws.send(json.dumps({'type':'error','message':str(error),'code':getattr(error,'code','invalid_message')}))
                 snapshot=shared.snapshot(client)
                 signature=(snapshot['revision'],snapshot['attendance_revision'])
                 if signature!=last_state:ws.send(json.dumps(snapshot));last_state=signature
@@ -156,9 +158,19 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     def status():
         return jsonify(models_ready=models_ready(), people=len(store.people()), threshold=THRESHOLD, samples=SAMPLES)
 
+    @app.get('/api/client-context')
+    def client_context():
+        return jsonify(token=token)
+
+    @app.post('/api/people')
+    def register_person():
+        return jsonify(person=store.save_profile(payload())),201
+
     @app.patch('/api/people/<int:person_id>/profile')
     def student_profile(person_id):
         data=payload()
+        if any(field in data for field in ('name','person_type','grade','section','academic_year','employee_code','admission_number')):
+            return jsonify(person=store.save_profile(data,person_id))
         return jsonify(person=store.update_student_profile(person_id,data.get('student_id',''),data.get('class_name','')))
 
     @app.get("/api/people")
@@ -255,13 +267,16 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     def enroll():
         data = payload()
         name = valid_name(data.get("name"))
+        person_id=data.get('person_id')
+        if person_id is not None and (type(person_id) is not int or person_id<1):
+            raise FaceError('invalid_person','Select a school record to enroll.')
         if data.get("consent") is not True:
             raise FaceError("consent_required", "Confirm permission to save this person's face pattern.")
         frames = data.get("images")
         if not isinstance(frames, list) or len(frames) != SAMPLES:
             raise FaceError("invalid_samples", f"Capture exactly {SAMPLES} face samples.")
         vectors = [get_engine().extract(decode_frame(frame))[0] for frame in frames]
-        return jsonify(person=store.enroll(name.strip(), vectors)), 201
+        return jsonify(person=store.enroll(name.strip(), vectors,person_id=person_id)), 201
 
     @app.post("/api/enroll/iphone")
     def enroll_iphone():
@@ -366,7 +381,8 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.post("/api/attendance/sessions")
     def start_attendance():
-        return jsonify(session=attendance.start(payload().get("name"),payload().get("class_name",""))), 201
+        data=payload()
+        return jsonify(session=attendance.start(data.get('name'),data.get('class_name',''),data.get('person_type',''),data.get('academic_year',''))),201
 
     @app.post('/api/attendance/sessions/<int:session_id>/records/<int:record_id>/movement')
     def manual_movement(session_id,record_id):

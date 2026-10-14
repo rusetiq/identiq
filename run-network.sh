@@ -6,4 +6,4 @@ if [ ! -x .venv/bin/python ]; then
   exit 1
 fi
 .venv/bin/python scripts/download_models.py
-exec .venv/bin/python scripts/run_network.py "$@"
+exec .venv/bin/python scripts/watch_network.py "$@"

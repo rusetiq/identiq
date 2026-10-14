@@ -10,6 +10,7 @@ class FaceTracker {
     this.status(null);this.check(generation);
   }
   async check(generation) {
+    let delay=400;
     while(this.running && generation===this.generation) {
       if(this.pause()) {await new Promise(resolve=>setTimeout(resolve,150));continue;}
       try {
@@ -17,12 +18,14 @@ class FaceTracker {
         const image=this.capture(),data=await this.request(image);
         if(!this.running || generation!==this.generation) return;
         this.accept(data,image,capturedAt);
+        delay=data.face_count ? 400 : Math.min(1200,delay+200);
       }catch(error){
         if(!this.running || generation!==this.generation) return;
         this.readyStreak=0;this.analysis=null;this.highlights=[];
         this.status({status:'adjust',message:error.message,code:error.code || 'connection'});this.render();this.onUpdate();
+        delay=['network_unavailable','server_timeout','server_unavailable'].includes(error.code)?Math.min(15000,Math.max(1000,delay*2)):400;
       }
-      await new Promise(resolve=>setTimeout(resolve,400));
+      await new Promise(resolve=>setTimeout(resolve,delay));
     }
   }
   invalidate() {this.readyStreak=0;this.analysis=null;this.lastCapturedAt=performance.now();this.onUpdate();}
