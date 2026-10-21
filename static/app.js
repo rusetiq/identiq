@@ -191,7 +191,7 @@ function setMode(mode) {
     $(`${current}-tab`).classList.toggle("active", current === mode);
     $(`${current}-tab`).setAttribute("aria-selected", String(current === mode));
   }
-  $("camera-hint").textContent = mode === "enroll" ? "One person only. Look forward, then turn slightly between samples." : "Up to 8 faces together. Keep every face clear and facing the camera.";
+  $("camera-hint").textContent = mode === "enroll" ? "One person only. Look forward, then turn slightly between samples." : `Up to ${$("camera-hint").dataset.maxFaces} faces together. Keep every face clear and facing the camera.`;
   updateControls();
 }
 

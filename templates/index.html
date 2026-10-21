@@ -28,7 +28,7 @@
       </div>
       <div class="tracking-status" id="tracking-status" aria-live="polite"><span class="tracking-dot"></span><strong id="tracking-title">Camera off</strong><span id="tracking-detail">Enable camera to see live facial landmarks.</span></div>
       <div class="tracking-metrics" id="tracking-metrics" hidden><span id="face-metric"></span><span id="clarity-metric"></span><label><input id="show-mesh" type="checkbox" checked> Facial landmarks</label></div>
-      <p id="camera-hint" class="camera-hint">Up to 8 faces together. Walk past with your face visible to the camera.</p>
+      <p id="camera-hint" class="camera-hint" data-max-faces="{{ max_faces }}">Up to {{ max_faces }} faces together. Walk past with your face visible to the camera.</p>
       <div class="shared-camera-controls"><p id="shared-status" class="message" role="status">Connecting shared staff controls…</p><button id="share-camera" class="button secondary" disabled>Share this camera</button><button id="stop-sharing" class="text-button" hidden>Stop sharing</button></div>
     </section>
     <section class="controls">

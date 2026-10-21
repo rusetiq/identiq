@@ -35,3 +35,5 @@ keep the designated camera page open and the device unlocked. browsers and the o
 - [x] remember an explicitly configured static server address without altering the os network configuration
 - [x] monitor http and https together and supervise both python entry points
 - [x] extend face-save deadlines and pause competing preview analysis while saving
+
+- [x] raise group attendance and recognition capacity to 20 faces with shared server and ui limit

@@ -12,7 +12,7 @@ from flask_sock import Sock
 from simple_websocket import ConnectionClosed
 from shared_camera import SharedCamera
 
-from biometrics import FaceEngine, FaceError, SAMPLES, THRESHOLD, Store, decode_frame, identify, identify_candidates
+from biometrics import FaceEngine, FaceError, MAX_FACES, SAMPLES, THRESHOLD, Store, decode_frame, identify, identify_candidates
 from iphone import valid_name, validate_capture
 from attendance import Attendance
 from parent_portal import PortalAccess
@@ -36,7 +36,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     sock=Sock(app)
     @app.context_processor
     def stylesheet_version():
-        return {'style_version':running_build,'build_version':running_build}
+        return {'style_version':running_build,'build_version':running_build,'max_faces':MAX_FACES}
 
     access = PortalAccess(store)
     app.extensions["portal_access"] = access

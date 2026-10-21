@@ -148,3 +148,34 @@ def test_group_cannot_overwrite_manual_correction_or_reopen_session(setup,image)
     saved=client.post(f'/api/attendance/sessions/{sid}/finish',json={},headers=headers).json['session']
     assert saved['counts']['present']==1 and saved['counts']['absent']==1
     assert scan_group(client,headers,image,sid,scanner).json['code']=='session_closed'
+
+
+def test_twenty_faces_are_accepted_and_the_twenty_first_is_over_capacity():
+    detector=engine(np.repeat(face(),20,axis=0));detector.recognizer=Recognizer()
+    result=detector.extract_group(smooth_image())
+    assert MAX_FACES==20 and result['face_count']==20 and len(result['faces'])==20
+    assert all(person['status']=='ready' and person['embedding'].shape==(128,) for person in result['faces'])
+    detector.detector.faces=np.repeat(face(),21,axis=0)
+    assert detector.extract_group(smooth_image())['code']=='too_many_faces'
+
+
+def test_twenty_identities_are_checked_in_once_in_one_group_request(setup,image):
+    client,headers,detector,_=setup
+    for index in range(20):
+        detector.vector=vector(index)
+        assert enroll(client,headers,image,name=f'Test student {index+1}').status_code==201
+    sid=start(client,headers).json['session']['id']
+    group=response_faces([vector(index) for index in range(20)])
+    for index,person in enumerate(group['faces']):person['box']=[.01+(index%5)*.19,.01+(index//5)*.24,.15,.22]
+    detector.extract_group=lambda frame:group
+    scanner=str(uuid.uuid4())
+    for iteration in range(2):
+        response=scan_group(client,headers,image,sid,scanner)
+        assert response.status_code==200
+        faces=response.json['faces']
+        assert len(faces)==20 and len({face['person']['id'] for face in faces})==20
+        assert all(face['status']=='matched' and face['attendance']['status']=='present' for face in faces)
+    attendance=client.application.extensions['attendance'].detail(sid)
+    assert attendance['counts']['present']==20 and len(attendance['movements'])==20
+    html=client.get('/').text
+    assert 'data-max-faces="20"' in html and 'Up to 20 faces together' in html

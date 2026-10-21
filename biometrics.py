@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 
 SAMPLES = 5
-MAX_FACES = 8
+MAX_FACES = 20
 THRESHOLD = 0.45
 MARGIN = 0.06
 
