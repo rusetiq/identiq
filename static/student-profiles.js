@@ -20,7 +20,7 @@ $('student-profile-form').onsubmit=async event=>{
   const data={name:$('profile-name').value.trim(),person_type:$('profile-type').value};
   for(const [id,field] of [['student-id','admission_number'],['profile-grade','grade'],['profile-section','section'],['profile-year','academic_year'],['profile-employee','employee_code']])data[field]=$(id).value.trim();
   try{const saved=await api(editingStudent?`/api/people/${editingStudent}/profile`:'/api/people',editingStudent?'PATCH':'POST',data);
-    await refreshPeople();$('enroll-person').value=String(saved.person.id);selectEnrollment();$('student-profile-dialog').close();toast('School record saved. Select Enroll when ready to capture their face.');}
+    await refreshPeople();enrollmentFilters.select(saved.person);$('student-profile-dialog').close();toast('School record saved. Select Enroll when ready to capture their face.');}
   catch(error){$('student-profile-error').hidden=false;$('student-profile-error').textContent=error.message;}
   finally{$('save-student-profile').disabled=false;$('cancel-student-profile').disabled=false;}
 };

@@ -1,14 +1,15 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let token = document.querySelector('meta[name="local-token"]').content;
-const state = { stream: null, mode: "attendance", scanning: false, enrolling: false, ready: false, people: [], activeAttendance: null, viewedAttendance: null, attendanceBusy: false, scanSessionId: null, phoneCapture: null, streak: 0, candidate: null, generation: 0, cameraGeneration: 0, cameraStarting: false, scanAbort: null, attendanceSessionCount: 0, movementMode:"automatic" };
+const state = { stream: null, mode: "attendance", scanning: false, enrolling: false, savingEnrollment: false, ready: false, people: [], activeAttendance: null, viewedAttendance: null, attendanceBusy: false, scanSessionId: null, phoneCapture: null, streak: 0, candidate: null, generation: 0, cameraGeneration: 0, cameraStarting: false, scanAbort: null, attendanceSessionCount: 0, movementMode:"automatic" };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let toastTimer;
 const captureCanvas=document.createElement('canvas');
 const liveTracker = new FaceTracker({video: $("video"), canvas: $("overlay"), capture: frame,
-  request: image => api("/api/analyze", "POST", {image,group:state.mode==='attendance' || state.mode==='verify' && !$("person-select").value}), onUpdate: updateControls, guide:()=>state.mode==="attendance" && state.activeAttendance && state.movementMode==="automatic" ? {axis:$("crossing-axis").value,direction:$("entry-direction").value} : null, pause:()=>document.hidden || state.scanning && (state.scanSessionId || !$("person-select").value)});
+  request: image => api("/api/analyze", "POST", {image,group:state.mode==='attendance' || state.mode==='verify' && !$("person-select").value}), onUpdate: updateControls, guide:()=>state.mode==="attendance" && state.activeAttendance && state.movementMode==="automatic" ? {axis:$("crossing-axis").value,direction:$("entry-direction").value} : null, pause:()=>document.hidden || state.savingEnrollment || state.scanning && (state.scanSessionId || !$("person-select").value)});
 let cancelEnrollment = false;
 const recentCheckIns=new Map();
+const enrollmentFilters=new window.EnrollmentFilters({onChange:()=>selectEnrollment()});
 
 function toast(message) {
   $("toast").textContent = message;
@@ -34,7 +35,7 @@ function expiredSession(){
 }
 async function api(path, method = "GET", data, signal, refreshed=false) {
   try{
-    const body=await window.IdentiqNetwork.request(path,{method,body:data,signal,headers:{"X-Local-Token":token}});
+    const body=await window.IdentiqNetwork.request(path,{method,body:data,signal,headers:{"X-Local-Token":token},timeoutMs:path.startsWith("/api/enroll")?60000:10000});
     connectionStatus('api',false);return body;
   }catch(error){
     if(error.status===401){expiredSession();throw error;}
@@ -73,6 +74,7 @@ function updateControls() {
   $("verify-tab").disabled = state.enrolling;
   $("enroll-tab").disabled = state.enrolling;
   $("person-name").disabled = $("enroll-person").disabled = state.enrolling;
+  for(const id of ["enroll-grade","enroll-section","enroll-search"])$(id).disabled=state.enrolling;
   $("consent").disabled = state.enrolling;
   $("add-person").disabled = state.enrolling;
   $("laptop-source").disabled = $("iphone-source").disabled = state.enrolling;
@@ -202,17 +204,10 @@ async function refreshPeople() {
   $('session-class').replaceChildren(new Option('All registered classes',''));
   for(const name of [...new Set(state.people.map(p=>p.class_name).filter(Boolean))].sort()) $('session-class').add(new Option(name,name));
   $('session-class').value=chosenClass;
-  const enrollmentTarget=$("enroll-person").value;
-  $("enroll-person").replaceChildren(new Option("Select a registered person", ""));
-  state.people.filter(person=>!person.samples).forEach(person=>$("enroll-person").add(new Option(`${person.name} · ${person.student_id || person.employee_code || "Record "+person.id}`,person.id)));
-  $("enroll-person").value=enrollmentTarget;selectEnrollment();
+  enrollmentFilters.refresh(state.people);
   const year=$("session-year").value;$("session-year").replaceChildren(new Option("All years",""));
   for(const value of [...new Set(state.people.map(person=>person.academic_year).filter(Boolean))].sort())$("session-year").add(new Option(value,value));
   $("session-year").value=year;
-  const phoneTarget = $("iphone-target").value;
-  $("iphone-target").replaceChildren(new Option("Select a school record", ""));
-  state.people.forEach(person => $("iphone-target").add(new Option(person.name, person.id)));
-  if (state.people.some(person => String(person.id) === phoneTarget)) $("iphone-target").value = phoneTarget;
   $("person-select").replaceChildren(new Option("Recognize anyone enrolled", ""));
   state.people.filter(person=>person.samples>0).forEach(person => $("person-select").add(new Option(person.name, person.id)));
   if (state.people.some(person => String(person.id) === selected)) $("person-select").value = selected;
@@ -236,7 +231,7 @@ async function refreshPeople() {
     const status = document.createElement("span");status.className = "person-status";status.textContent=person.samples ? 'FACE ENROLLED' : 'AWAITING FACE';
     const remove = document.createElement("button");remove.className = "text-button";remove.textContent = "Remove";remove.setAttribute("aria-label",`Remove ${person.name}`);
     remove.onclick = () => askDelete(person);
-    const capture=document.createElement('button');capture.className='text-button';capture.textContent='Enroll face';capture.hidden=person.samples>0;capture.onclick=()=>{setMode('enroll');setSource('laptop');$('enroll-person').value=String(person.id);selectEnrollment();$('enroll-panel').scrollIntoView({behavior:'smooth',block:'center'});};
+    const capture=document.createElement('button');capture.className='text-button';capture.textContent='Enroll face';capture.hidden=person.samples>0;capture.onclick=()=>{setMode('enroll');setSource('laptop');enrollmentFilters.select(person);$('enroll-panel').scrollIntoView({behavior:'smooth',block:'center'});};
     row.append(avatar,info,status,capture,edit,remove);$("people-list").append(row);
   }
   updateControls();
@@ -365,17 +360,18 @@ async function enroll(event) {
     if (samples.length !== 5) throw new Error(`${samples.length} / 5 samples captured. ${lastIssue} Capture timed out; adjust the camera view and try again.`);
     if (cancelEnrollment || !state.stream) throw Object.assign(new Error("Capture cancelled. Your face patterns were not saved."), {code: "cancelled"});
     $("cancel-capture").hidden = true;
-    $("enroll-message").textContent="Saving face patterns to your local database…";
+    state.savingEnrollment=true;
+    $("enroll-message").textContent="Saving face patterns to your local database. Keep this page open…";
     const saved = await api("/api/enroll", "POST", {name,person_id:personId,consent:true,images:samples});
     await refreshPeople();
     $("person-name").value="";$("consent").checked=false;
     $("enroll-message").textContent=`${saved.person.name} is enrolled. You can now recognize their face.`;
     toast(`${saved.person.name} enrolled successfully.`);completed=true;
   } catch (error) {
-    $("enroll-message").textContent=error.message;$("enroll-message").classList.add("error");
+    $("enroll-message").textContent=error.message+(transientError(error)?" Check this school record before capturing again; the server may have saved it.":"");$("enroll-message").classList.add("error");
 
   } finally {
-    samples.length=0;state.enrolling=false;$("cancel-capture").hidden = true;clearBox();updateControls();
+    samples.length=0;state.enrolling=false;state.savingEnrollment=false;$("cancel-capture").hidden = true;clearBox();updateControls();
     if (completed) {setMode("verify");result("Enrollment complete","Start recognition to retrieve the saved name.");}
   }
 }
@@ -520,7 +516,7 @@ $("iphone-file").onchange = async () => {
 $("iphone-form").onsubmit = async event => {
   event.preventDefault();
   if (!state.phoneCapture || !$("iphone-target").value || !$("iphone-consent").checked || state.enrolling) return;
-  stopScan(); state.enrolling = true; updateControls();
+  stopScan(); state.enrolling = true; state.savingEnrollment=true; updateControls();
   $("iphone-message").classList.remove("error");
   $("iphone-message").textContent = "Checking face samples and saving patterns…";
   let completed = false;
@@ -535,7 +531,7 @@ $("iphone-form").onsubmit = async event => {
   } catch (error) {
     $("iphone-message").textContent = error.message; $("iphone-message").classList.add("error");
   } finally {
-    state.enrolling = false; updateControls();
+    state.enrolling = false; state.savingEnrollment=false; updateControls();
     if (completed) {setMode("verify"); result("Phone enrollment saved", "Enable the laptop camera and start recognition.");}
   }
 };

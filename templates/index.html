@@ -7,6 +7,7 @@
   <title>Identiq · Attendance</title><link rel="icon" href="data:,">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=style_version) }}">
   <script defer src="{{ url_for('static', filename='live-face.js', v=build_version) }}"></script>
+  <script defer src="{{ url_for('static', filename='enrollment-filters.js', v=build_version) }}"></script>
   <script defer src="{{ url_for('static', filename='app.js', v=build_version) }}"></script>
   <script defer src="{{ url_for('static', filename='parent-admin.js', v=build_version) }}"></script>
   <script defer src="/static/student-profiles.js?v={{ build_version }}"></script>
@@ -45,6 +46,8 @@
         <details class="technical"><summary>Match details</summary><div class="score-row" id="score-row" hidden><span>Cosine similarity</span><strong id="score-value">—</strong></div><p>Three consecutive matches confirm the name. This is not a liveness check.</p></details>
       </div>
       <div id="enroll-panel" hidden>
+        <div class="enrollment-filters"><div><label for="enroll-grade">Grade</label><select id="enroll-grade"><option value="">Select a grade</option></select></div><div><label for="enroll-section">Section</label><select id="enroll-section"><option value="">All sections</option></select></div></div>
+        <label for="enroll-search">Find student or staff</label><input id="enroll-search" type="search" placeholder="Name, admission number or employee code" autocomplete="off"><p id="enroll-filter-summary" class="message" role="status">Select a grade and section, or search by name or admission number.</p>
         <div class="source-switch" aria-label="Enrollment source"><button id="laptop-source" class="selected" aria-pressed="true">Laptop camera</button><button id="iphone-source" aria-pressed="false">iPhone scan</button></div>
         <div id="laptop-enroll"><form id="enroll-form"><label for="enroll-person">School record</label><select id="enroll-person" required><option value="">Select a registered student or staff member</option></select><label for="person-name">Name</label><input id="person-name" name="name" maxlength="80" readonly placeholder="Select a school record above" required><p class="message">Add details in the school directory first, then capture their face here.</p>
           <label class="consent"><input type="checkbox" id="consent" required><span>I have permission to save this person’s face pattern.</span></label>

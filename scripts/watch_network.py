@@ -1,13 +1,15 @@
 """Run the school server until stopped, recovering from an unexpected process exit."""
 import signal
+import argparse
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from run_network import lan_address
+from run_network import configured_address
 
 
-def supervise(command):
+def supervise(command,pinned_address=None):
     child=None
     stopping=False
     def stop(signum,frame):
@@ -19,7 +21,9 @@ def supervise(command):
     try:
         while not stopping:
             started=time.monotonic()
-            child=subprocess.Popen(command)
+            environment=None
+            if pinned_address is not None:environment={**os.environ,'_IDENTIQ_BIND_ADDRESS':pinned_address}
+            child=subprocess.Popen(command,env=environment)
             code=child.wait()
             if stopping or code==0:return code
             # A startup failure is usually an invalid address, occupied port or bad config.
@@ -42,10 +46,15 @@ def supervise(command):
 
 def main():
     arguments=sys.argv[1:]
-    if '--address' not in arguments and not any(arg.startswith('--address=') for arg in arguments):
-        # Pin the original network address so a restart never silently changes its audience.
-        arguments=['--address',lan_address(),*arguments]
-    return supervise([sys.executable,str(Path(__file__).with_name('run_network.py')),*arguments])
+    command=[sys.executable,str(Path(__file__).with_name('run_network.py')),'--worker',*arguments]
+    if '--help' in arguments or '-h' in arguments:return subprocess.call(command)
+    parser=argparse.ArgumentParser(add_help=False)
+    choices=parser.add_mutually_exclusive_group()
+    choices.add_argument('--address');choices.add_argument('--auto-address',action='store_true')
+    options,_=parser.parse_known_args(arguments)
+    # Keep this run on its approved interface without saving automatically discovered IPs.
+    address=configured_address(options.address,auto=options.auto_address)
+    return supervise(command,pinned_address=address)
 
 
 if __name__=='__main__':

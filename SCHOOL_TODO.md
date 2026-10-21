@@ -26,3 +26,12 @@ This is a local school attendance workflow; production deployment, individual st
 - [x] restart unexpected server exits while preserving the original network address
 
 keep the designated camera page open and the device unlocked. browsers and the operating system may suspend a background or locked camera. network recovery does not record attendance while the camera cannot reach the laptop.
+
+## school tablet follow-up
+
+- [x] grade and section filters shared by camera enrollment and iphone import
+- [x] search by name, admission number or employee code without preloading all enrollment choices
+- [x] clear filtered-out selections before capture and keep class selection after a save
+- [x] remember an explicitly configured static server address without altering the os network configuration
+- [x] monitor http and https together and supervise both python entry points
+- [x] extend face-save deadlines and pause competing preview analysis while saving

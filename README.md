@@ -130,3 +130,19 @@ The network launcher restarts an unexpected server exit using the original IP ad
 `git pull` updates files, but an already running server keeps its loaded Python code. Stop the existing server with Ctrl+C, start it again using the same command and refresh the tablet page. JavaScript and CSS now carry an app version in their URLs so refreshed pages request the matching assets.
 
 Choose **Connection check** on the sign-in page, parent portal or camera panel. It shows the tablet address, page version, running server version, installed version, reachability and the last failed request. It distinguishes a server that needs restarting from a tablet page that needs refreshing. Request bodies, credentials, student records and images are excluded. All pages use bounded request deadlines and readable network errors; parent attendance reads reconnect automatically. Enrollment, login and other mutations are never automatically replayed after a transport failure.
+
+## school static address and enrollment filters
+
+For the school laptop whose existing static address is `10.10.40.40`, stop the old server, pull updates, then run:
+
+```sh
+python scripts/run_network.py --address 10.10.40.40 --http --port 8080 --https-port 8443
+```
+
+Open **https://10.10.40.40:8443/** on the tablet for its camera. Plain HTTP is **http://10.10.40.40:8080/**. The startup command remembers an explicitly selected address in the ignored local `data/network.json`; later launches use that address. This only binds the app to an address already assigned to the laptop. It does not configure Windows networking. Use `--auto-address` when intentionally moving the app to another network. A saved address never silently falls back to a different interface.
+
+IPs preceding timestamped request logs identify clients. They do not indicate that the server IP changed. Startup prints the server's bind address and protocol-specific links. A TLS-looking binary request logged as HTTP 400 can mean HTTPS was sent to the HTTP port. `ERR_CONNECTION_REFUSED` on port 8443 means the HTTPS service at that address is not accepting the connection; working internet access does not verify local server access. If it persists after startup, check that 10.10.40.40 is actually assigned to the laptop and ask school IT to check inbound TCP 8443 and routing between the tablet and server networks. Do not disable the firewall.
+
+Both `run_network.py` and `watch_network.py` now supervise unexpected exits. All advertised listeners are monitored together; if HTTPS stops, the whole network worker restarts instead of silently leaving only HTTP running. Ctrl+C stops the service normally.
+
+In **Enroll**, choose **Grade** and **Section** before selecting a student. Name/admission-number search is also available. These filters apply to laptop capture and iPhone import; changing the filters clears a selected record that no longer matches. Existing students without grade metadata and staff remain available under **Staff / no grade assigned**. Face-save requests allow up to 60 seconds for upload and processing, with redundant live analysis paused during the save. A timed-out enrollment is not automatically resubmitted; check that student's record before capturing again.
