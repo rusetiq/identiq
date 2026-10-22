@@ -414,10 +414,14 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             raise
         tracking=None
         if session_id is not None:
+            # Optimize frame_id hash: hash the incoming payload string directly
+            # to avoid allocating ~1-3MB raw BGR pixel arrays and hashing millions of bytes.
+            raw_image = data.get('image')
+            frame_id = hashlib.sha256(raw_image.encode() if isinstance(raw_image, str) and raw_image else frame.tobytes()).hexdigest()
             with store.lock,shared.lock:
                 shared.guard(data)
                 tracking=attendance.observe(session_id,scanner_id,{**recognition,'box':box,'quality':analysis.get('quality',{})},action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive'),
-                    frame_id=hashlib.sha256(frame.tobytes()).hexdigest(),received_at=received_at)
+                    frame_id=frame_id,received_at=received_at)
             if tracking.get('newly_moved'):shared.attendance_changed()
         return jsonify(**recognition, box=box, threshold=MATCH_THRESHOLD, attendance=tracking,
                        processing_ms=round((time.perf_counter()-processing_started)*1000,1))
@@ -457,10 +461,14 @@ def create_app(database=None, engine=None, allowed_hosts=None):
                     face['status'] = 'ambiguous'
                     face['message'] = 'Multiple faces match the same enrollment. No attendance marked for those faces.'
             if session_id is not None:
+                # Optimize frame_id hash: hash the incoming payload string directly
+                # to avoid allocating ~1-3MB raw BGR pixel arrays and hashing millions of bytes.
+                raw_image = data.get('image')
+                frame_id = hashlib.sha256(raw_image.encode() if isinstance(raw_image, str) and raw_image else frame.tobytes()).hexdigest()
                 with store.lock,shared.lock:
                     shared.guard(data)
                     updates = attendance.observe_group(session_id, scanner_id, faces, data.get('attendance_action','check_in'),data.get('crossing_axis','x'),data.get('entry_direction','positive'),
-                        frame_id=hashlib.sha256(frame.tobytes()).hexdigest(),received_at=received_at)
+                        frame_id=frame_id,received_at=received_at)
                 if any(update.get('newly_moved') for update in updates):shared.attendance_changed()
                 for face, update in zip(faces, updates):
                     face['attendance'] = update
