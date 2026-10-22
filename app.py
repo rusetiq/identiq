@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import secrets
@@ -12,7 +13,8 @@ from flask_sock import Sock
 from simple_websocket import ConnectionClosed
 from shared_camera import SharedCamera
 
-from biometrics import FaceEngine, FaceError, MAX_FACES, SAMPLES, THRESHOLD, Store, decode_frame, identify, identify_candidates
+from biometrics import FaceEngine, FaceError, MAX_FACES, SAMPLES, Store, decode_frame, identify, identify_candidates
+from attendance_policy import MATCH_THRESHOLD, CONFIRMATIONS
 from iphone import valid_name, validate_capture
 from attendance import Attendance
 from parent_portal import PortalAccess
@@ -163,7 +165,8 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.get("/api/status")
     def status():
-        return jsonify(models_ready=models_ready(), people=len(store.people()), threshold=THRESHOLD, samples=SAMPLES)
+        return jsonify(models_ready=models_ready(), people=len(store.people()), threshold=MATCH_THRESHOLD, samples=SAMPLES,
+                       attendance_confirmations=CONFIRMATIONS)
 
     @app.get('/api/client-context')
     def client_context():
@@ -299,6 +302,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.post("/api/recognize")
     def recognize():
+        received_at = attendance.clock()
         data = payload()
         claimed_id = data.get("person_id")
         if claimed_id is not None and (type(claimed_id) is not int or claimed_id < 1):
@@ -311,7 +315,12 @@ def create_app(database=None, engine=None, allowed_hosts=None):
         if session_id is not None:
             with shared.lock:shared.guard(data)
         try:
-            vector, box = get_engine().extract(decode_frame(data.get("image")))
+            frame = decode_frame(data.get('image'))
+            if session_id is not None:
+                vector, analysis = get_engine().extract_with_quality(frame)
+                box = analysis['box']
+            else:
+                vector, box = get_engine().extract(frame)
             recognition = identify(store, vector, claimed_id)
         except FaceError:
             if session_id is not None:
@@ -321,12 +330,14 @@ def create_app(database=None, engine=None, allowed_hosts=None):
         if session_id is not None:
             with store.lock,shared.lock:
                 shared.guard(data)
-                tracking=attendance.observe(session_id,scanner_id,{**recognition,'box':box},action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive'))
+                tracking=attendance.observe(session_id,scanner_id,{**recognition,'box':box,'quality':analysis.get('quality',{})},action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive'),
+                    frame_id=hashlib.sha256(frame.tobytes()).hexdigest(),received_at=received_at)
             if tracking.get('newly_moved'):shared.attendance_changed()
-        return jsonify(**recognition, box=box, threshold=THRESHOLD, attendance=tracking)
+        return jsonify(**recognition, box=box, threshold=MATCH_THRESHOLD, attendance=tracking)
 
     @app.post('/api/recognize/group')
     def recognize_group():
+        received_at = attendance.clock()
         data = payload()
         if data.get('person_id') is not None:
             raise FaceError('invalid_person', 'Selected-person verification requires one face. Use the single-face scanner.')
@@ -337,7 +348,8 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             scanner_id = attendance.scanner(data.get('scanner_id'))
             with shared.lock:shared.guard(data)
         try:
-            result = get_engine().extract_group(decode_frame(data.get('image')))
+            frame = decode_frame(data.get('image'))
+            result = get_engine().extract_group(frame)
             matches = iter(identify_candidates(candidates) for candidates in store.candidates_batch([face['embedding'] for face in result['faces'] if face['status']=='ready']))
             faces = []
             for face in result['faces']:
@@ -355,11 +367,12 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             if session_id is not None:
                 with store.lock,shared.lock:
                     shared.guard(data)
-                    updates = attendance.observe_group(session_id, scanner_id, faces, data.get('attendance_action','check_in'),data.get('crossing_axis','x'),data.get('entry_direction','positive'))
+                    updates = attendance.observe_group(session_id, scanner_id, faces, data.get('attendance_action','check_in'),data.get('crossing_axis','x'),data.get('entry_direction','positive'),
+                        frame_id=hashlib.sha256(frame.tobytes()).hexdigest(),received_at=received_at)
                 if any(update.get('newly_moved') for update in updates):shared.attendance_changed()
                 for face, update in zip(faces, updates):
                     face['attendance'] = update
-            return jsonify(**{**result, 'faces':faces}, threshold=THRESHOLD)
+            return jsonify(**{**result, 'faces':faces}, threshold=MATCH_THRESHOLD)
         except FaceError:
             if session_id is not None:
                 attendance.reset(session_id, scanner_id)

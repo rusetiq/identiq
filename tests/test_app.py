@@ -2,6 +2,7 @@ import json
 import base64
 import re
 import sqlite3
+import itertools
 
 import cv2
 import numpy as np
@@ -29,17 +30,32 @@ class FakeEngine:
             return {"status": "adjust", "code": self.error.code, "message": str(self.error), "face_count": 0}
         return {"status": "ready", "face_count": 1, "box": [0.1, 0.1, 0.5, 0.5],
                 "landmarks": [[0.3,0.3],[0.6,0.3],[0.45,0.5],[0.3,0.7],[0.6,0.7]],
-                "quality": {"face_size_px": 80, "sharpness": 20, "brightness": 120}}
+                "quality": {"face_size_px": 160, "sharpness": 20, "brightness": 120, "detection_score": .99}}
 
     def extract(self, frame):
         if self.error:
             raise self.error
         return self.vector.copy(), [0.1, 0.1, 0.5, 0.5]
 
+    def extract_with_quality(self, frame):
+        embedding, box = self.extract(frame)
+        return embedding, {**self.analyze(frame), 'box':box}
+
+
+_frames = itertools.count(1)
+
+
+def fresh_image(image):
+    """Synthetic successive camera frames, with actual differing decoded pixels."""
+    frame = decode_frame(image)
+    cv2.putText(frame, str(next(_frames)), (2, 25), cv2.FONT_HERSHEY_SIMPLEX, .6, (255,255,255), 2)
+    _, encoded = cv2.imencode('.jpg', frame)
+    return 'data:image/jpeg;base64,' + base64.b64encode(encoded).decode()
+
 
 @pytest.fixture
 def image():
-    _, encoded = cv2.imencode(".jpg", np.zeros((160, 160, 3), dtype=np.uint8))
+    _, encoded = cv2.imencode(".jpg", np.zeros((320, 320, 3), dtype=np.uint8))
     return "data:image/jpeg;base64," + base64.b64encode(encoded).decode()
 
 

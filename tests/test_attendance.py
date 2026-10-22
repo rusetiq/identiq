@@ -8,7 +8,7 @@ import pytest
 from app import create_app
 from attendance import Attendance
 from biometrics import FaceError, Store
-from test_app import setup, image, vector, enroll, FakeEngine
+from test_app import setup, image, vector, enroll, FakeEngine, fresh_image
 
 
 def start(client, headers, name="Morning attendance"):
@@ -22,7 +22,7 @@ def clock(client):
 
 
 def recognize(client,headers,image,session_id,scanner=None):
-    return client.post('/api/recognize',json={"image":image,"attendance_session_id":session_id,
+    return client.post('/api/recognize',json={"image":fresh_image(image),"attendance_session_id":session_id,
         "scanner_id":scanner or str(uuid.uuid4())},headers=headers)
 
 
@@ -33,7 +33,7 @@ def test_camera_marks_present_once_and_unseen_absent_only_at_end(setup,image):
     session=start(client,headers).json['session'];sid=session['id']
     assert session['counts']=={"total":2,"present":0,"pending":2,"absent":0}
     engine.vector=vector();moment=clock(client);scanner=str(uuid.uuid4())
-    for count in (1,):
+    for count in (1,2,3):
         response=recognize(client,headers,image,sid,scanner).json
         assert response['attendance']['confirmations']==count
         moment[0]+=.7
@@ -53,7 +53,7 @@ def test_camera_marks_present_once_and_unseen_absent_only_at_end(setup,image):
 
 
 @pytest.mark.parametrize('interruption',['unknown','no_face','different_person','gap'])
-def test_interruptions_do_not_undo_first_match_attendance(setup,image,interruption):
+def test_interruptions_reset_unconfirmed_identity_without_marking_present(setup,image,interruption):
     client,headers,engine,_=setup
     enroll(client,headers,image,name='Alex');engine.vector=vector(1);enroll(client,headers,image,name='Taylor');engine.vector=vector()
     sid=start(client,headers).json['session']['id'];scanner=str(uuid.uuid4());moment=clock(client)
@@ -66,17 +66,17 @@ def test_interruptions_do_not_undo_first_match_attendance(setup,image,interrupti
         recognize(client,headers,image,sid,scanner);moment[0]+=.7
     engine.vector=vector();engine.error=None
     result=recognize(client,headers,image,sid,scanner).json['attendance']
-    assert result['status']=='present' and result['confirmations']==1
-    assert client.get(f'/api/attendance/sessions/{sid}').json['session']['counts']['present']==(2 if interruption=='different_person' else 1)
+    assert result['status']=='confirming' and result['confirmations']==1
+    assert client.get(f'/api/attendance/sessions/{sid}').json['session']['counts']['present']==0
 
 
-def test_fast_duplicates_and_separate_scanners_keep_one_present_record(setup,image):
+def test_fast_duplicates_and_separate_scanners_cannot_confirm_attendance(setup,image):
     client,headers,_,_=setup;enroll(client,headers,image)
     sid=start(client,headers).json['session']['id'];moment=clock(client);scanner=str(uuid.uuid4())
     for _ in range(5): assert recognize(client,headers,image,sid,scanner).json['attendance']['confirmations']==1
     moment[0]+=.7
     assert recognize(client,headers,image,sid,str(uuid.uuid4())).json['attendance']['confirmations']==1
-    assert client.get(f'/api/attendance/sessions/{sid}').json['session']['counts']['present']==1
+    assert client.get(f'/api/attendance/sessions/{sid}').json['session']['counts']['present']==0
 
 
 def test_roster_is_a_snapshot_and_history_survives_deleted_enrollment(setup,image):

@@ -53,7 +53,7 @@ function updateControls() {
   $("attendance-flow").disabled=$("fullscreen-flow").disabled=state.enrolling || state.attendanceBusy;
   $("fullscreen-flow").value=$("attendance-flow").value=state.movementMode;
   $("direction-settings").hidden=state.movementMode!=="automatic";
-  $("movement-instructions").textContent=state.movementMode==="automatic" ? "Cross the line in the check-in direction to arrive, and the opposite direction to depart. Disappearing from the camera does not check a student out." : state.movementMode==="check_out" ? "Exit camera mode: recognized students with a recorded arrival are checked out." : "Entry camera mode: one successful match records check-in.";
+  $("movement-instructions").textContent=state.movementMode==="automatic" ? "Keep your face clear while crossing the line. Movement requires a confirmed identity and a clear crossing." : state.movementMode==="check_out" ? "Exit camera mode: confirm your face across fresh frames to check out after a recorded arrival." : "Entry camera mode: hold still for confirmation across fresh frames before check-in.";
   document.querySelectorAll('#attendance-roster button').forEach(button=>button.disabled=state.attendanceBusy || button.dataset.unavailable==='true');
   $("delete-attendance").disabled=state.attendanceBusy || state.enrolling || !state.attendanceSessionCount;
   $("fullscreen-scan").hidden=state.mode!=="attendance" || !state.activeAttendance;
@@ -91,7 +91,7 @@ function result(title, detail, kind = "", score = null) {
     $(`${prefix}-icon`).textContent = kind === "matched" ? "✓" : kind === "warning" ? "!" : "⌁";
   }
   $("score-row").hidden = score === null;
-  if (score !== null) $("score-value").textContent = `${score.toFixed(3)} / threshold 0.450`;
+  if (score !== null) $("score-value").textContent = `${score.toFixed(3)}${Number.isFinite(state.matchThreshold) ? ` / threshold ${state.matchThreshold.toFixed(3)}` : ''}`;
 }
 
 function clearBox() {
@@ -259,6 +259,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       const capturedAt=performance.now(),image=frame();
       const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {...sharedContext,attendance_session_id: attendanceSessionId, scanner_id: scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value} : {}) }, scanAbort.signal);
       if (!state.scanning || generation !== state.generation) break;
+      state.matchThreshold=data.threshold;
       failures=0;
       if(group) {liveTracker.accept(data,image,capturedAt);await showGroupResults(data,groupStreaks,attendanceSessionId);continue;}
       if (data.status === "matched") {
@@ -271,10 +272,10 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
           if (attendance.status === "present") {
             result(data.person.name, "Marked present for this session.", "matched", data.similarity);
             if (attendance.newly_present) { toast(`${data.person.name} marked present.`); await refreshAttendance(attendanceSessionId); }
-          } else if (attendance.status === "confirming") result("Confirming attendance…", `${attendance.confirmations} of 1 required match`, "", data.similarity);
-          else result(data.person.name, attendance.message, "warning", data.similarity);
+          } else if (attendance.status === "confirming") result("Confirming attendance…", `${attendance.confirmations} of ${attendance.required_confirmations} fresh matches · hold still`, "", data.similarity);
+          else result("Face needs review", attendance.message, "warning", data.similarity);
         }
-        drawBox(data.box, confirmed, data.person.name);
+        drawBox(data.box, confirmed, confirmed ? data.person.name : "Confirming face…");
       } else {
         state.streak = 0;state.candidate = null;
         result({unknown:"Unknown face",ambiguous:"Uncertain match",mismatch:"Identity mismatch",empty:"No enrolled faces"}[data.status] || "Try again",data.message,"warning",data.similarity ?? null);
@@ -308,8 +309,9 @@ async function showGroupResults(data,streaks,sessionId) {
       name=face.person.name;streaks.set(face.person.id,(streaks.get(face.person.id) || 0)+1);
       matched=sessionId ? ['present','checked_out'].includes(face.attendance.status) || face.attendance.campus_state==='on_campus' && face.attendance.status==='tracking' : streaks.get(face.person.id)>=3;
       if(matched) {confirmed++;detail=sessionId ? face.attendance.status==='manual_override' ? 'Present · staff correction' : face.attendance.campus_state==='checked_out' ? 'Checked out' : 'Checked in' : 'Recognized';}
-      else if(!sessionId || face.attendance.status==='confirming') {confirming++;detail=`${sessionId ? face.attendance.confirmations : streaks.get(face.person.id)} of ${sessionId ? 1 : 3} consecutive matches`;}
+      else if(!sessionId || face.attendance.status==='confirming') {confirming++;detail=`${sessionId ? face.attendance.confirmations : streaks.get(face.person.id)} of ${sessionId ? face.attendance.required_confirmations : 3} fresh matches · hold still`;}
       else detail=face.attendance.status==='manual_override' ? `Staff marked ${face.attendance.attendance_status}. Camera status kept unchanged.` : face.attendance.message;
+      if(!matched) name=(!sessionId || face.attendance.status==='confirming') ? 'Confirming face…' : 'Face needs review';
       if(face.attendance?.newly_moved || face.attendance?.newly_present) newlyPresent.push(`${name} ${face.attendance.action==='check_out' ? 'checked out' : 'checked in'}`);
     } else if(face.status==='ambiguous') name='Uncertain match';
     const row=document.createElement('div');row.className=`scan-face-row ${matched?'confirmed':face.status==='matched'?'confirming':'warning'}`;

@@ -1,5 +1,6 @@
 import uuid
 import sqlite3
+import hashlib
 import pytest
 from attendance import Attendance
 from biometrics import Store
@@ -14,22 +15,27 @@ def movement_fixture(tmp_path):
     scanner=str(uuid.uuid4())
     def scan(screen_x,action='automatic',axis='x',direction='positive',status='matched'):
         box=[1-screen_x-.1,.2,.2,.2] if axis=='x' else [.2,screen_x-.1,.2,.2]
-        result=attendance.observe_group(sid,scanner,[{'status':status,'person':person,'box':box}],action,axis,direction)[0]
-        moment[0]+=.2;return result
+        evidence={'status':status,'person':person,'box':box,'similarity':1.,'match_margin':None,'candidate_count':1,
+                  'quality':{'face_size_px':160,'sharpness':20,'detection_score':.99}}
+        frame_id=hashlib.sha256(str(moment[0]).encode()).hexdigest()
+        result=attendance.observe_group(sid,scanner,[evidence],action,axis,direction,frame_id=frame_id)[0]
+        moment[0]+=.35;return result
     return attendance,sid,moment,scan
 
 
 def test_direction_crossing_arrival_departure_reentry_and_duplicate_sightings(tmp_path):
     attendance,sid,_,scan=movement_fixture(tmp_path)
-    assert scan(.2)['status']=='tracking'
-    assert scan(.5)['status']=='tracking'
+    assert scan(.2)['status']=='confirming'
+    assert scan(.5)['status']=='confirming'
     assert scan(.8)['newly_moved'] is True
     detail=attendance.detail(sid);assert detail['movement_counts']['on_campus']==1
     assert detail['roster'][0]['checked_in_at'] and not detail['roster'][0]['checked_out_at']
     assert scan(.8)['status']=='tracking'
     assert len(attendance.detail(sid)['movements'])==1
+    scan(.5)
     assert scan(.2)['status']=='checked_out'
     assert attendance.detail(sid)['roster'][0]['status']=='present'
+    scan(.5)
     assert scan(.8)['status']=='present'
     detail=attendance.detail(sid)
     assert [m['action'] for m in reversed(detail['movements'])]==['check_in','check_out','check_in']
@@ -41,24 +47,27 @@ def test_direction_crossing_arrival_departure_reentry_and_duplicate_sightings(tm
 def test_configurable_entry_direction(tmp_path,axis,direction,start_point,end_point):
     attendance,sid,_,scan=movement_fixture(tmp_path)
     scan(start_point,axis=axis,direction=direction)
+    scan(.5,axis=axis,direction=direction)
     assert scan(end_point,axis=axis,direction=direction)['action']=='check_in'
     assert attendance.detail(sid)['counts']['present']==1
 
 
 def test_jitter_gaps_uncertainty_and_missing_faces_do_not_make_movements(tmp_path):
     attendance,sid,moment,scan=movement_fixture(tmp_path)
-    for x in [.46,.51,.54,.49]:assert scan(x)['status']=='tracking'
+    for x in [.46,.51,.54,.49]:assert scan(x)['status'] in ('confirming','tracking')
     assert attendance.detail(sid)['movements']==[]
-    scan(.2);scan(.8,status='ambiguous');assert scan(.8)['status']=='tracking'
+    scan(.2);scan(.8,status='ambiguous');assert scan(.8)['status']=='confirming'
     assert attendance.detail(sid)['movements']==[]
-    moment[0]+=2;assert scan(.2)['status']=='tracking'
+    moment[0]+=2;assert scan(.2)['status']=='confirming'
     assert attendance.detail(sid)['movements']==[]
 
 
 def test_checkout_requires_arrival_and_finishing_does_not_fabricate_exit(tmp_path):
     attendance,sid,_,scan=movement_fixture(tmp_path)
+    scan(.8,'check_out');scan(.8,'check_out')
     assert scan(.8,'check_out')['status']=='not_checked_in'
     assert attendance.detail(sid)['counts']['pending']==1
+    scan(.2,'check_in');scan(.2,'check_in')
     assert scan(.2,'check_in')['status']=='present'
     saved=attendance.finish(sid)
     assert saved['roster'][0]['campus_state']=='on_campus'
@@ -101,7 +110,7 @@ def test_camera_mode_invalid_options_and_no_crossing_with_forged_manual_data(set
         response=client.post('/api/recognize',json={'image':image,'attendance_session_id':sid,'scanner_id':str(uuid.uuid4()),'attendance_action':option},headers=headers)
         assert response.status_code==422
     data=client.post('/api/recognize',json={'image':image,'attendance_session_id':sid,'scanner_id':str(uuid.uuid4()),'attendance_action':'automatic','box':[.1,.1,.2,.2]},headers=headers).json
-    assert data['attendance']['status']=='tracking'
+    assert data['attendance']['status']=='confirming'
 
 
 def test_student_profiles_unique_ids_class_rosters_snapshots_and_auth(setup,image):
@@ -131,7 +140,8 @@ def test_clear_attendance_removes_movement_ledger_but_keeps_profiles(tmp_path):
     attendance,sid,_,scan=movement_fixture(tmp_path)
     person=attendance.store.people()[0]
     attendance.store.update_student_profile(person['id'],'S-1','7A')
-    scan(.2,'check_in');scan(.8,'check_out')
+    for _ in range(3):scan(.2,'check_in')
+    for _ in range(3):scan(.8,'check_out')
     attendance.clear_all()
     with attendance.store.connect() as db:
         assert db.execute('SELECT count(*) FROM attendance_movements').fetchone()[0]==0

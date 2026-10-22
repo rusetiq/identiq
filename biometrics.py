@@ -11,11 +11,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
+from attendance_policy import MATCH_THRESHOLD, MATCH_MARGIN
 
 SAMPLES = 5
 MAX_FACES = 20
-THRESHOLD = 0.45
-MARGIN = 0.06
+ENROLLMENT_THRESHOLD = 0.45
+ENROLLMENT_MARGIN = 0.06
 
 
 class FaceError(ValueError):
@@ -160,13 +161,17 @@ class FaceEngine:
             return self._analyze(image)[0]
 
     def extract(self, image):
+        embedding, analysis = self.extract_with_quality(image)
+        return embedding, analysis['box']
+
+    def extract_with_quality(self, image):
         with self.lock:
             analysis, face = self._analyze(image)
             if analysis["status"] != "ready":
                 raise FaceError(analysis["code"], analysis["message"])
             aligned = self.recognizer.alignCrop(image, face)
             embedding = normalize(self.recognizer.feature(aligned).copy())
-            return embedding, analysis["box"]
+            return embedding, analysis
 
 
 class Store:
@@ -359,12 +364,12 @@ class Store:
                     registered=db.execute('SELECT name FROM people WHERE id=?',(person_id,)).fetchone()
                 if registered is None:raise FaceError('person_missing','That school record no longer exists.')
                 existing = next((p for p in candidates if p["id"] == person_id), None)
-                if existing is None and candidates and candidates[0]['similarity']>=THRESHOLD:
+                if existing is None and candidates and candidates[0]['similarity']>=ENROLLMENT_THRESHOLD:
                     raise FaceError('duplicate_face',f"This face is already enrolled as {candidates[0]['name']}.")
-                if existing is not None and (existing["similarity"] < THRESHOLD or candidates[0]["id"] != person_id or
-                        (len(candidates) > 1 and candidates[0]["similarity"] - candidates[1]["similarity"] < MARGIN)):
+                if existing is not None and (existing["similarity"] < ENROLLMENT_THRESHOLD or candidates[0]["id"] != person_id or
+                        (len(candidates) > 1 and candidates[0]["similarity"] - candidates[1]["similarity"] < ENROLLMENT_MARGIN)):
                     raise FaceError("identity_mismatch", "Samples do not clearly match the selected person. No patterns were added.")
-            elif candidates and candidates[0]["similarity"] >= THRESHOLD:
+            elif candidates and candidates[0]["similarity"] >= ENROLLMENT_THRESHOLD:
                 raise FaceError("duplicate_face", f"This face is already enrolled as {candidates[0]['name']}.")
             with self.connect() as db:
                 if person_id is None:
@@ -397,10 +402,12 @@ def identify_candidates(candidates, claimed_id=None):
         return {"status": "empty", "message": "Enroll someone to begin recognition."}
     best = candidates[0]
     similarity = round(best["similarity"], 4)
-    if best["similarity"] < THRESHOLD:
+    margin = best['similarity'] - candidates[1]['similarity'] if len(candidates) > 1 else None
+    evidence = {'similarity': similarity, 'match_margin': margin, 'candidate_count': len(candidates)}
+    if best["similarity"] < MATCH_THRESHOLD:
         return {"status": "unknown", "message": "Face not recognized.", "similarity": similarity}
-    if len(candidates) > 1 and best["similarity"] - candidates[1]["similarity"] < MARGIN:
+    if margin is not None and margin < MATCH_MARGIN:
         return {"status": "ambiguous", "message": "Match is too close to another enrollment. Try again.", "similarity": similarity}
     if claimed_id is not None and best["id"] != claimed_id:
         return {"status": "mismatch", "message": "Face does not match the selected person.", "similarity": similarity}
-    return {"status": "matched", "person": {"id": best["id"], "name": best["name"]}, "similarity": similarity}
+    return {"status": "matched", "person": {"id": best["id"], "name": best["name"]}, **evidence}

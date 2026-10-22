@@ -1,7 +1,7 @@
 import base64
 import pytest
 from biometrics import FaceError
-from test_app import setup,image,enroll
+from test_app import setup,image,enroll,fresh_image
 from test_attendance import start
 from test_parent_portal import link,parent_client
 
@@ -38,13 +38,17 @@ def test_one_source_latest_frames_controls_and_keys_are_scoped(setup,image):
 
 
 def test_shared_scan_rejects_non_source_and_late_results(setup,image):
-    client,headers,sid,room,_,source,viewer,jpeg=room_fixture(setup,image)
+    client,headers,sid,room,moment,source,viewer,jpeg=room_fixture(setup,image)
+    room.attendance.clock=lambda:moment[0]
     room.command(source,{'type':'claim','action':'check_in'});room.publish(source,jpeg);room.command(viewer,{'type':'start'})
     snapshot=room.snapshot(source)
     payload={'image':image,'attendance_session_id':sid,'scanner_id':snapshot['scanner_id'],
              'shared_key':snapshot['source_key'],'shared_epoch':snapshot['epoch'],'attendance_action':'check_out'}
     assert client.post('/api/recognize',json={k:v for k,v in payload.items() if k!='shared_key'},headers=headers).json['code']=='shared_scan_stopped'
-    matched=client.post('/api/recognize',json=payload,headers=headers).json
+    for _ in range(3):
+        payload['image']=fresh_image(image)
+        matched=client.post('/api/recognize',json=payload,headers=headers).json
+        moment[0]+=.35
     assert matched['attendance']['newly_moved'] and matched['attendance']['action']=='check_in' # server configuration wins
     assert len(room.attendance.detail(sid)['movements'])==1
     room.command(viewer,{'type':'pause'})

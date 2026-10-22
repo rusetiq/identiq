@@ -44,16 +44,18 @@ def test_group_attendance_uses_one_connection_and_retains_confirmed_status(tmp_p
         connections.append(1)
         with original() as db:yield db
     store.connect=tracked
-    matches=[{'status':'matched','person':person} for person in people]
+    matches=[{'status':'matched','person':person,'similarity':1.,'match_margin':1.,'candidate_count':8,
+              'box':[.1,.1,.3,.3],'quality':{'face_size_px':120,'sharpness':20,'detection_score':.99}} for person in people]
     for count in (1,2,3):
-        connections.clear();result=attendance.observe_group(sid,scanner,matches)
+        connections.clear();result=attendance.observe_group(sid,scanner,matches,frame_id=str(count).zfill(64))
         assert len(connections)==1
-        assert all(r['confirmations']==1 for r in result)
-        assert all(r['status']=='present' and r['newly_present']==(count==1) for r in result)
+        assert all(r['confirmations']==count for r in result)
+        assert all(r['status']==('present' if count==3 else 'confirming') and r['newly_present']==(count==3) for r in result)
         now[0]+=.7
     assert all(r['status']=='present' for r in result)
     now[0]-=.6
-    assert all(r['status']=='present' for r in attendance.observe_group(sid,scanner,matches))
+    burst=attendance.observe_group(sid,scanner,matches,frame_id='4'.zfill(64))
+    assert all(r['status']=='present' and not r['newly_moved'] for r in burst)
     assert attendance.detail(sid)['counts']['present']==8
 
 

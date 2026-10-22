@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from biometrics import FaceError, MAX_FACES
-from test_app import setup, image, vector, enroll
+from test_app import setup, image, vector, enroll, fresh_image
 from test_attendance import start, clock
 from test_tracking import engine, face, smooth_image
 
@@ -49,12 +49,12 @@ def test_empty_and_over_capacity_groups_do_not_extract():
 
 def response_faces(vectors):
     return {'status':'ready' if vectors else 'adjust','face_count':len(vectors),'ready_count':len(vectors),
-            'message':'Test group','faces':[{'status':'ready','embedding':v,'box':[i*.4,.1,.2,.4],
-            'landmarks':[[.1,.1]]*5,'quality':{'face_size_px':100}} for i,v in enumerate(vectors)]}
+            'message':'Test group','faces':[{'status':'ready','embedding':v,'box':[(int(np.argmax(v))%3)*.3,.1,.2,.4],
+            'landmarks':[[.1,.1]]*5,'quality':{'face_size_px':100,'sharpness':20,'detection_score':.99}} for v in vectors]}
 
 
 def scan_group(client,headers,image,sid,scanner):
-    return client.post('/api/recognize/group',json={'image':image,'attendance_session_id':sid,'scanner_id':scanner},headers=headers)
+    return client.post('/api/recognize/group',json={'image':fresh_image(image),'attendance_session_id':sid,'scanner_id':scanner},headers=headers)
 
 
 def prepare(setup,image):
@@ -64,15 +64,15 @@ def prepare(setup,image):
     return client,headers,detector,sid,moment,scanner
 
 
-def test_group_first_match_checks_in_each_identity_when_order_changes(setup,image):
+def test_group_confirms_each_identity_independently_when_detector_order_changes(setup,image):
     client,headers,detector,sid,moment,scanner=prepare(setup,image)
     for count in (1,2,3):
         order=[vector(),vector(1)] if count%2 else [vector(1),vector()]
         detector.extract_group=lambda frame:response_faces(order)
         result=scan_group(client,headers,image,sid,scanner).json
-        assert all(face['attendance']['confirmations']==1 for face in result['faces'])
+        assert all(face['attendance']['confirmations']==count for face in result['faces'])
         assert all('embedding' not in face for face in result['faces'])
-        assert all(face['attendance']['newly_present']==(count==1) for face in result['faces'])
+        assert all(face['attendance']['newly_present']==(count==3) for face in result['faces'])
         moment[0]+=.7
     detail=client.get(f'/api/attendance/sessions/{sid}').json['session']
     assert detail['counts']['present']==2 and all(p['first_seen_at'] for p in detail['roster'])
@@ -80,7 +80,7 @@ def test_group_first_match_checks_in_each_identity_when_order_changes(setup,imag
     assert all(not face['attendance']['newly_present'] for face in repeated['faces'])
 
 
-def test_missing_face_keeps_first_match_attendance(setup,image):
+def test_missing_face_restarts_only_that_identity_confirmation(setup,image):
     client,headers,detector,sid,moment,scanner=prepare(setup,image)
     detector.extract_group=lambda frame:response_faces([vector(),vector(1)])
     scan_group(client,headers,image,sid,scanner);moment[0]+=.7
@@ -127,7 +127,7 @@ def test_group_empty_invalid_and_separate_scanners_do_not_accumulate(setup,image
     detector.extract_group=lambda frame:response_faces([vector()])
     scan_group(client,headers,image,sid,scanner);moment[0]+=.7
     other=str(uuid.uuid4());scan_group(client,headers,image,sid,other);moment[0]+=.7
-    assert scan_group(client,headers,image,sid,scanner).json['faces'][0]['attendance']['confirmations']==1
+    assert scan_group(client,headers,image,sid,scanner).json['faces'][0]['attendance']['confirmations']==2
     moment[0]+=.7
     invalid=client.post('/api/recognize/group',json={'image':'invalid','attendance_session_id':sid,'scanner_id':scanner},headers=headers)
     assert invalid.status_code==422
@@ -159,7 +159,7 @@ def test_twenty_faces_are_accepted_and_the_twenty_first_is_over_capacity():
     assert detector.extract_group(smooth_image())['code']=='too_many_faces'
 
 
-def test_twenty_identities_are_checked_in_once_in_one_group_request(setup,image):
+def test_twenty_identities_require_fresh_confirmations_before_checking_in(setup,image):
     client,headers,detector,_=setup
     for index in range(20):
         detector.vector=vector(index)
@@ -168,13 +168,14 @@ def test_twenty_identities_are_checked_in_once_in_one_group_request(setup,image)
     group=response_faces([vector(index) for index in range(20)])
     for index,person in enumerate(group['faces']):person['box']=[.01+(index%5)*.19,.01+(index//5)*.24,.15,.22]
     detector.extract_group=lambda frame:group
-    scanner=str(uuid.uuid4())
-    for iteration in range(2):
+    scanner=str(uuid.uuid4());moment=clock(client)
+    for iteration in range(4):
         response=scan_group(client,headers,image,sid,scanner)
         assert response.status_code==200
         faces=response.json['faces']
         assert len(faces)==20 and len({face['person']['id'] for face in faces})==20
-        assert all(face['status']=='matched' and face['attendance']['status']=='present' for face in faces)
+        assert all(face['status']=='matched' and face['attendance']['status']==('present' if iteration>=2 else 'confirming') for face in faces)
+        moment[0]+=.7
     attendance=client.application.extensions['attendance'].detail(sid)
     assert attendance['counts']['present']==20 and len(attendance['movements'])==20
     html=client.get('/').text

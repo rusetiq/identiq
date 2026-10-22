@@ -4,10 +4,14 @@ import io
 import time
 import uuid
 import sqlite3
+import math
 from contextlib import closing
 
 from biometrics import FaceError
 from iphone import valid_name
+from attendance_policy import (MATCH_THRESHOLD, MATCH_MARGIN, CONFIRMATIONS,
+    MIN_INTERVAL, MIN_DURATION, MAX_GAP, MAX_FRAME_AGE, MIN_FACE_PIXELS,
+    MIN_SHARPNESS, MIN_DETECTION_SCORE)
 
 
 class Attendance:
@@ -16,6 +20,7 @@ class Attendance:
         self.clock = clock
         self.sightings = {}
         self.crossings = {}
+        self.frames = {}
 
     def sessions(self):
         with self.store.connect() as db:
@@ -50,7 +55,7 @@ class Attendance:
                 with closing(sqlite3.connect(path,timeout=10)) as db: purge(db)
                 backups+=1
             with self.store.connect() as db: counts=purge(db)
-            self.sightings.clear();self.crossings.clear()
+            self.sightings.clear();self.crossings.clear();self.frames.clear()
         return {'sessions_deleted':counts['attendance_sessions'],'records_deleted':counts['attendance_records'],'backups_cleared':backups}
 
     def detail(self, session_id):
@@ -167,65 +172,153 @@ class Attendance:
             if row is None:raise FaceError('record_missing','That student is not in this session.')
             if action=='check_out' and row['campus_state']!='on_campus':raise FaceError('not_checked_in','Only checked-in students can check out.')
             result=self.apply_movement(db,row,action,'staff',note.strip())
+            self.sightings = {key:value for key,value in self.sightings.items() if key[0] != session_id}
+            self.crossings = {key:value for key,value in self.crossings.items() if key[0] != session_id}
         return result
 
-    def observe_group(self, session_id, scanner_id, recognitions, action='check_in', axis='x', direction='positive'):
+    @staticmethod
+    def outcome(status, count=0, message='No attendance marked.', **fields):
+        return {'status':status, 'confirmations':count, 'required_confirmations':CONFIRMATIONS,
+                'newly_present':False, 'newly_moved':False, 'message':message, **fields}
+
+    @staticmethod
+    def clear_evidence(recognition):
+        """Fail closed when an inference does not contain usable match evidence."""
+        def finite(value):
+            return type(value) in (int, float) and math.isfinite(value)
+        score = recognition.get('similarity')
+        margin = recognition.get('match_margin')
+        candidates = recognition.get('candidate_count')
+        if not finite(score) or score < MATCH_THRESHOLD or score > 1.000001:
+            return False
+        if type(candidates) is not int or candidates < 1:
+            return False
+        if candidates > 1 and (not finite(margin) or margin < MATCH_MARGIN):
+            return False
+        quality = recognition.get('quality', {})
+        if not isinstance(quality, dict):
+            return False
+        limits = {'face_size_px':MIN_FACE_PIXELS, 'sharpness':MIN_SHARPNESS,
+                  'detection_score':MIN_DETECTION_SCORE}
+        if any(not finite(quality.get(key)) or quality[key] < minimum for key,minimum in limits.items()):
+            return False
+        box = recognition.get('box')
+        return (isinstance(box, (list, tuple)) and len(box) == 4 and all(finite(v) for v in box)
+                and box[2] > 0 and box[3] > 0 and box[0] >= 0 and box[1] >= 0
+                and box[0] + box[2] <= 1.01 and box[1] + box[3] <= 1.01)
+
+    @staticmethod
+    def continuous_box(previous, box):
+        # A name reappearing on another face elsewhere must start confirmation again.
+        old = previous['box']
+        ratios = [box[i] / old[i] for i in (2, 3)]
+        dx = abs(box[0] + box[2]/2 - old[0] - old[2]/2)
+        dy = abs(box[1] + box[3]/2 - old[1] - old[3]/2)
+        return (all(.5 <= ratio <= 2 for ratio in ratios)
+                and dx <= 1.5 * max(box[2], old[2]) + 1e-8
+                and dy <= 1.5 * max(box[3], old[3]) + 1e-8)
+
+    def observe_group(self, session_id, scanner_id, recognitions, action='check_in', axis='x', direction='positive',
+                      frame_id=None, received_at=None):
         self.movement_options(action,axis,direction)
         scanner_id = self.scanner(scanner_id)
         with self.store.lock, self.store.connect() as db:
             self.ensure_active(session_id, db)
             now = self.clock()
-            present_ids = {item['person']['id'] for item in recognitions if item['status'] == 'matched'}
-            self.crossings={key:value for key,value in self.crossings.items() if key[:2]!=(session_id,scanner_id) or key[2] in present_ids}
-            # Observation state belongs to an identity, never a face-array position.
-            # Drop missing identities from the short-lived duplicate-request cache.
-            self.sightings = {key: value for key, value in self.sightings.items()
-                             if now-value['time'] < 30 and not (len(key) == 3 and key[:2] == (session_id, scanner_id) and key[2] not in present_ids)}
-            return [self.observe(session_id, scanner_id, item, group=True, _db=db, _now=now, _checked=True, action=action, axis=axis, direction=direction) if item['status'] == 'matched'
-                    else {'status':'unrecognized','confirmations':0,'message':'No attendance marked.'} for item in recognitions]
+            received_at = now if received_at is None else received_at
+            frame_key = (session_id, scanner_id)
+            if type(received_at) not in (int, float) or not math.isfinite(received_at):
+                self.reset(session_id, scanner_id)
+                return [self.outcome('stale_frame', message='Invalid camera timing. No attendance saved.') for _ in recognitions]
+            last = self.frames.get(frame_key)
+            # Check before pruning identities: a late frame must not erase newer evidence.
+            if last and received_at < last['received_at']:
+                return [self.outcome('stale_frame', message='Discarded an out-of-order camera frame.') for _ in recognitions]
+            self.frames = {key:value for key,value in self.frames.items() if now-value['time'] < 30}
+            if len(self.frames) >= 256 and frame_key not in self.frames:
+                self.frames.pop(next(iter(self.frames)))
+            self.frames[frame_key] = {'received_at':received_at, 'time':now}
+            if (not isinstance(frame_id,str) or len(frame_id) != 64 or
+                    not 0 <= now-received_at <= MAX_FRAME_AGE):
+                self.reset(session_id, scanner_id)
+                return [self.outcome('stale_frame', message='Waiting for a fresh camera frame. No attendance saved.') for _ in recognitions]
+            counts = {}
+            for item in recognitions:
+                if item['status'] == 'matched':
+                    person_id = item['person']['id']
+                    counts[person_id] = counts.get(person_id, 0) + 1
+            present_ids = {person_id for person_id,count in counts.items() if count == 1}
+            self.crossings = {key:value for key,value in self.crossings.items()
+                              if key[:2] != frame_key or key[2] in present_ids}
+            self.sightings = {key:value for key,value in self.sightings.items()
+                              if now-value['time'] <= MAX_GAP and (key[:2] != frame_key or key[2] in present_ids)}
+            return [self._observe(db, session_id, scanner_id, item, now, action, axis, direction, frame_id)
+                    if item['status'] == 'matched' and counts[item['person']['id']] == 1
+                    else self.outcome('unrecognized') for item in recognitions]
 
-    def observe(self, session_id, scanner_id, recognition, group=False, _db=None, _now=None, _checked=False, action='check_in', axis='x', direction='positive'):
-        self.movement_options(action,axis,direction)
-        if _db is None:
-            with self.store.lock, self.store.connect() as db:
-                return self.observe(session_id, scanner_id, recognition, group, db, action=action,axis=axis,direction=direction)
-        scanner_id = self.scanner(scanner_id)
-        key = (session_id, scanner_id, recognition['person']['id']) if group else (session_id, scanner_id)
-        with self.store.lock:
-            if not _checked:
-                self.ensure_active(session_id, _db)
-            now = self.clock() if _now is None else _now
-            # Limit ephemeral confirmation state; timestamps are not stored images.
-            if not _checked:
-                self.sightings = {k: v for k, v in self.sightings.items() if now-v["time"] < 30}
-            if recognition["status"] != "matched":
-                self.sightings.pop(key, None)
-                return {"status": "unrecognized", "confirmations": 0, "message": "No attendance marked."}
-            person_id = recognition["person"]["id"]
-            row = _db.execute("SELECT * FROM attendance_records WHERE session_id=? AND person_id=?", (session_id, person_id)).fetchone()
-            if row is None:
-                self.sightings.pop(key, None)
-                return {"status": "outside_roster", "confirmations": 0, "message": "Recognized, but not in this session's starting roster."}
-            previous = self.sightings.get(key)
-            count = 1
-            if previous and previous["person"] == person_id and now-previous["time"] <= 4:
-                # Avoid rewriting timestamps for rapid duplicate observations.
-                if action!='automatic' and previous.get("action")==action and now-previous["time"] < 0.25:
-                    status = 'manual_override' if row['method']=='manual' and row['status']!='present' else 'checked_out' if row['campus_state']=='checked_out' else 'present' if row['status']=='present' else 'confirming'
-                    return {"status":status,"confirmations":previous['count'],"record_id":row['id'],"newly_present":False,
-                            "campus_state":row['campus_state'],"attendance_status":row['status'],"message":"Manual attendance status kept."}
-            if len(self.sightings) >= 256 and key not in self.sightings:
-                self.sightings.pop(next(iter(self.sightings)))
-            self.sightings[key] = {"person": person_id, "count": count, "time": now, "action":action}
-            if row["method"] == "manual" and row["status"] != "present":
-                return {"status": "manual_override", "confirmations": count, "record_id": row["id"],
-                        "attendance_status":row["status"], "message": "Manual attendance status kept."}
-            movement=action
-            if action=='automatic':
-                movement=self.crossing(session_id,scanner_id,recognition,axis,direction,now)
-                if movement is None:return {'status':'tracking','confirmations':1,'newly_present':False,'newly_moved':False,'campus_state':row['campus_state'],'message':'Waiting for a clear crossing of the line.'}
-            result=self.apply_movement(_db,row,movement,'automatic' if action=='automatic' else 'camera')
-            return {**result,'confirmations':1,'record_id':row['id']}
+    def observe(self, session_id, scanner_id, recognition, action='check_in', axis='x', direction='positive',
+                frame_id=None, received_at=None):
+        return self.observe_group(session_id, scanner_id, [recognition], action, axis, direction,
+                                  frame_id=frame_id, received_at=received_at)[0]
+
+    def _observe(self, db, session_id, scanner_id, recognition, now, action, axis, direction, frame_id):
+        person_id = recognition['person']['id']
+        key = (session_id, scanner_id, person_id)
+        crossing_key = (*key, axis, direction)
+        row = db.execute('SELECT * FROM attendance_records WHERE session_id=? AND person_id=?', (session_id,person_id)).fetchone()
+        if row is None:
+            self.sightings.pop(key, None)
+            self.crossings.pop(crossing_key, None)
+            return self.outcome('outside_roster', message="Recognized, but not in this session's starting roster.")
+        if row['method'] == 'manual' and row['status'] != 'present':
+            self.sightings.pop(key, None)
+            self.crossings.pop(crossing_key, None)
+            return self.outcome('manual_override', record_id=row['id'], attendance_status=row['status'], message='Manual attendance status kept.')
+        if not self.clear_evidence(recognition):
+            self.sightings.pop(key, None)
+            self.crossings.pop(crossing_key, None)
+            return self.outcome('insufficient_evidence', message='Move closer and hold still. A clearer, stronger match is required.')
+        previous = self.sightings.get(key)
+        options = (action, axis, direction)
+        if previous and (now-previous['time'] > MAX_GAP or previous['options'] != options
+                         or not self.continuous_box(previous, recognition['box'])):
+            previous = None
+        if previous is None:
+            self.crossings.pop(crossing_key, None)
+            evidence = {'count':0, 'started':now, 'time':now, 'frames':[], 'options':options,
+                        'box':recognition['box'], 'min_similarity':recognition['similarity'], 'movement':None}
+        else:
+            evidence = previous
+        # Retries and bursts are not independent observations. Do not update their
+        # timestamps or crossing state, even after an identity was confirmed.
+        if frame_id in evidence['frames'] or previous and now-previous['time'] < MIN_INTERVAL:
+            if evidence.get('confirmed'):
+                status = ('tracking' if action == 'automatic' else
+                          'present' if action == 'check_in' and row['campus_state'] == 'on_campus' else
+                          'checked_out' if action == 'check_out' and row['campus_state'] == 'checked_out' else 'confirming')
+                return self.outcome(status, evidence['count'], campus_state=row['campus_state'],
+                                    message='Identity already confirmed. No new movement saved.')
+            return self.outcome('confirming', evidence['count'], message='Waiting for the next fresh confirmation frame.')
+        evidence = {**evidence, 'count':min(CONFIRMATIONS, evidence['count']+1), 'time':now,
+                    'frames':[*evidence['frames'][-7:], frame_id], 'box':recognition['box'],
+                    'min_similarity':min(evidence['min_similarity'],recognition['similarity'])}
+        if action == 'automatic':
+            crossing = self.crossing(session_id, scanner_id, recognition, axis, direction, now)
+            if crossing:
+                evidence['movement'] = crossing
+        if len(self.sightings) >= 256 and key not in self.sightings:
+            self.sightings.pop(next(iter(self.sightings)))
+        self.sightings[key] = evidence
+        if evidence['count'] < CONFIRMATIONS or now-evidence['started'] < MIN_DURATION:
+            return self.outcome('confirming', evidence['count'], message='Confirming the same identity across fresh, clear camera frames.')
+        evidence['confirmed'] = True
+        movement = evidence['movement'] if action == 'automatic' else action
+        if movement is None:
+            return self.outcome('tracking', evidence['count'], campus_state=row['campus_state'], message='Waiting for a clear crossing of the line.')
+        evidence['movement'] = None
+        note = f"Camera confirmed across {CONFIRMATIONS} fresh frames; minimum similarity {evidence['min_similarity']:.4f}."
+        result = self.apply_movement(db, row, movement, 'automatic' if action == 'automatic' else 'camera', note)
+        return {**self.outcome(result['status'], evidence['count']), **result, 'record_id':row['id']}
 
     def finish(self, session_id):
         with self.store.lock, self.store.connect() as db:
@@ -235,6 +328,7 @@ class Attendance:
             if session["status"] == "active":
                 db.execute("UPDATE attendance_records SET status='absent',method='session_end' WHERE session_id=? AND status='pending'", (session_id,))
                 db.execute("UPDATE attendance_sessions SET status='closed',ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (session_id,))
+            self.frames = {key:value for key,value in self.frames.items() if key[0] != session_id}
             self.sightings = {key: value for key, value in self.sightings.items() if key[0] != session_id}
             self.crossings = {key:value for key,value in self.crossings.items() if key[0] != session_id}
         return self.detail(session_id)
@@ -258,6 +352,7 @@ class Attendance:
                                  (status, None if status == "pending" else "manual", session_id, record_id)).rowcount
             if not updated:
                 raise FaceError("record_missing", "That person is not in this attendance session.")
+            self.frames = {key:value for key,value in self.frames.items() if key[0] != session_id}
             self.sightings = {key: value for key, value in self.sightings.items() if key[0] != session_id}
             self.crossings = {key:value for key,value in self.crossings.items() if key[0] != session_id}
         return self.detail(session_id)
