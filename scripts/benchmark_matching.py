@@ -13,14 +13,14 @@ import time
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from biometrics import Store
+from biometrics import EMBEDDING_DIMENSION, Store
 
 
 def benchmark(identities=1000, faces=20, runs=30):
     rng = np.random.default_rng(42)
-    bases = rng.normal(size=(identities,128)).astype(np.float32)
+    bases = rng.normal(size=(identities,EMBEDDING_DIMENSION)).astype(np.float32)
     bases /= np.linalg.norm(bases,axis=1,keepdims=True)
-    samples = bases[:,None,:] + rng.normal(0,.02,(identities,5,128)).astype(np.float32)
+    samples = bases[:,None,:] + rng.normal(0,.02,(identities,5,EMBEDDING_DIMENSION)).astype(np.float32)
     samples /= np.linalg.norm(samples,axis=2,keepdims=True)
     queries = bases[np.arange(faces) % identities]
     with tempfile.TemporaryDirectory(prefix='identiq-matching-') as directory:

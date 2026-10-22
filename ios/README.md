@@ -32,7 +32,7 @@ The export contains photos and is sensitive. The companion clears in-memory samp
 
 The app rejects missing/dropped depth, multiple faces, off-center faces, unsupported RGB/depth aspect alignment, incomplete pose coverage, implausible face distances, insufficient valid depth, and very flat/extreme depth spread. These are **experimental quality heuristics**. They do not establish identity or robust liveness. Files are not signed or hardware-attested, and their depth summaries can be forged.
 
-Recognition uses the existing SFace RGB matcher. Depth is not part of its embedding, so better accuracy has not been demonstrated. True 3D identity matching would require a separate model, calibration and validation, plus depth capture during verification; the laptop's ordinary RGB camera cannot supply that depth.
+Recognition uses the existing ArcFace RGB matcher. Depth is not part of its embedding, so better accuracy has not been demonstrated. True 3D identity matching would require a separate model, calibration and validation, plus depth capture during verification; the laptop's ordinary RGB camera cannot supply that depth.
 
 Physical-device validation must check whether both output connections rotate the RGB and depth buffers alike, face-region alignment, Vision yaw direction, depth format/frame-rate support, and capture thresholds. No fallback to camera-only or estimated ARKit geometry is labeled as TrueDepth.
 

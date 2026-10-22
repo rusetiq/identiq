@@ -9,11 +9,11 @@ import numpy as np
 import pytest
 
 from app import create_app
-from biometrics import FaceError, Store, decode_frame, identify, normalize
+from biometrics import EMBEDDING_DIMENSION, FaceError, Store, decode_frame, identify, normalize
 
 
 def vector(index=0, second=None):
-    result = np.zeros(128, dtype=np.float32)
+    result = np.zeros(EMBEDDING_DIMENSION, dtype=np.float32)
     result[index] = 1
     if second is not None:
         result[second] = 1

@@ -1,4 +1,4 @@
-"""Local YuNet detection, SFace embeddings, and SQLite identity storage."""
+"""Local YuNet detection, ArcFace embeddings, and SQLite identity storage."""
 import base64
 import binascii
 import io
@@ -10,13 +10,22 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+# pyrefly: ignore[missing-import]
+import onnxruntime as ort
 from PIL import Image
 from attendance_policy import MATCH_THRESHOLD, MATCH_MARGIN, quality_issue
 
 SAMPLES = 5
 MAX_FACES = 20
+EMBEDDING_DIMENSION = 512
 ENROLLMENT_THRESHOLD = 0.45
 ENROLLMENT_MARGIN = 0.06
+
+# The five-point ArcFace reference landmark locations for a 112 x 112 crop.
+ARCFACE_REFERENCE = np.asarray([
+    [38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
+    [41.5493, 92.3655], [70.7299, 92.2041],
+], dtype=np.float32)
 
 
 class FaceError(ValueError):
@@ -28,7 +37,7 @@ class FaceError(ValueError):
 def normalize(vector):
     vector = np.asarray(vector, dtype=np.float32).flatten()
     norm = np.linalg.norm(vector)
-    if vector.size != 128 or not np.isfinite(vector).all() or norm < 1e-8:
+    if vector.size != EMBEDDING_DIMENSION or not np.isfinite(vector).all() or norm < 1e-8:
         raise FaceError("invalid_embedding", "Could not read a valid face pattern. Try again.")
     return vector / norm
 
@@ -57,10 +66,36 @@ def decode_frame(value):
 class FaceEngine:
     def __init__(self, model_dir):
         self.lock = threading.Lock()
+        # Retaining thousands of proposed boxes is wasted work for a school
+        # scanner that accepts at most MAX_FACES people in one frame. Keeping
+        # a small headroom preserves crowded-frame detection while cutting the
+        # detector's post-processing cost on modest CPUs.
         self.detector = cv2.FaceDetectorYN.create(
-            str(model_dir / "face_detection_yunet_2023mar.onnx"), "", (640, 480), 0.75, 0.3, 5000)
-        self.recognizer = cv2.FaceRecognizerSF.create(
-            str(model_dir / "face_recognition_sface_2021dec.onnx"), "")
+            str(model_dir / "face_detection_yunet_2023mar.onnx"), "", (640, 480), 0.75, 0.3, max(80, MAX_FACES * 4))
+        model_path = model_dir / "arcface_w600k_r50.onnx"
+        if not model_path.is_file():
+            raise FaceError("models_missing", "Install the research face model: python scripts/download_models.py")
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        self.recognizer = ort.InferenceSession(str(model_path), sess_options=options,
+                                               providers=["CPUExecutionProvider"])
+        self.recognizer_input = self.recognizer.get_inputs()[0].name
+        self.recognizer_output = self.recognizer.get_outputs()[0].name
+
+    def _arcface_embedding(self, image, face):
+        if hasattr(self.recognizer, "alignCrop") and hasattr(self.recognizer, "feature"):
+            aligned = self.recognizer.alignCrop(image, face)
+            return normalize(self.recognizer.feature(aligned).copy())
+        landmarks = np.asarray(face[4:14], dtype=np.float32).reshape(5, 2)
+        transform, _ = cv2.estimateAffinePartial2D(landmarks, ARCFACE_REFERENCE, method=cv2.LMEDS)
+        if transform is None:
+            raise FaceError("invalid_embedding", "Could not align facial features. Keep your face toward the camera.")
+        aligned = cv2.warpAffine(image, transform, (112, 112), flags=cv2.INTER_LINEAR, borderValue=0)
+        blob = cv2.dnn.blobFromImage(aligned, 1.0 / 127.5, (112, 112),
+                                     (127.5, 127.5, 127.5), swapRB=True)
+        vector = self.recognizer.run([self.recognizer_output], {self.recognizer_input: blob})[0]
+        return normalize(vector)
 
     def _detect_at_size(self, image, max_side):
         height, width = image.shape[:2]
@@ -143,8 +178,7 @@ class FaceEngine:
             # enrollment still requires a face that fills enough of the frame.
             analysis, _ = self._quality(image, face,minimum_fraction=0,attendance=attendance)
             if extract and analysis['status'] == 'ready':
-                aligned = self.recognizer.alignCrop(image, face)
-                analysis['embedding'] = normalize(self.recognizer.feature(aligned).copy())
+                analysis['embedding'] = self._arcface_embedding(image, face)
             faces.append(analysis)
         ready = sum(face['status'] == 'ready' for face in faces)
         return {"status": "ready" if ready else "adjust", "face_count": len(faces), "ready_count": ready, "faces": faces,
@@ -176,8 +210,7 @@ class FaceEngine:
             analysis, face = self._analyze(image, attendance=attendance)
             if analysis["status"] != "ready":
                 raise FaceError(analysis["code"], analysis["message"])
-            aligned = self.recognizer.alignCrop(image, face)
-            embedding = normalize(self.recognizer.feature(aligned).copy())
+            embedding = self._arcface_embedding(image, face)
             return embedding, analysis
 
 
@@ -284,9 +317,10 @@ class Store:
         with self.connect() as db:
             return [dict(row) for row in db.execute("""
                 SELECT p.*, count(e.person_id) AS samples,
+                    coalesce(sum(length(e.vector)=?),0) AS compatible_samples,
                     coalesce(sum(e.source='iphone_truedepth'),0) AS iphone_samples FROM people p
                 LEFT JOIN embeddings e ON p.id=e.person_id GROUP BY p.id ORDER BY p.id DESC
-            """)]
+            """, (EMBEDDING_DIMENSION * 4,))]
 
     def save_profile(self, data, person_id=None):
         fields=('name','person_type','student_id','grade','section','academic_year','employee_code','class_name')
@@ -340,13 +374,14 @@ class Store:
             db.execute('BEGIN')
             revision = db.execute('SELECT value FROM identity_revision WHERE id=1').fetchone()[0]
             if self._identity_cache is None or self._identity_cache[0] != revision:
-                rows = db.execute("SELECT p.id,p.name,e.vector FROM people p JOIN embeddings e ON p.id=e.person_id ORDER BY p.id").fetchall()
+                rows = db.execute("SELECT p.id,p.name,e.vector FROM people p JOIN embeddings e ON p.id=e.person_id WHERE length(e.vector)=? ORDER BY p.id",
+                                  (EMBEDDING_DIMENSION * 4,)).fetchall()
                 grouped = {}
                 for row in rows:
                     grouped.setdefault(row['id'], {'name':row['name'],'vectors':[]})['vectors'].append(np.frombuffer(row['vector'],dtype=np.float32))
                 people = [{'id':person_id,'name':person['name']} for person_id,person in grouped.items()]
                 # Unnormalized means preserve the existing average sample similarity.
-                matrix = np.asarray([np.mean(person['vectors'],axis=0,dtype=np.float64) for person in grouped.values()],dtype=np.float64).reshape((-1,128))
+                matrix = np.asarray([np.mean(person['vectors'],axis=0,dtype=np.float64) for person in grouped.values()],dtype=np.float64).reshape((-1,EMBEDDING_DIMENSION))
                 matrix.setflags(write=False)
                 self._identity_cache = (revision, people, matrix)
             _, people, matrix = self._identity_cache
@@ -396,7 +431,7 @@ class Store:
                     person_id = cursor.lastrowid
                 else:
                     name = registered['name']
-                    if db.execute("SELECT count(*) FROM embeddings WHERE person_id=? AND source=?", (person_id, source)).fetchone()[0] >= SAMPLES:
+                    if db.execute("SELECT count(*) FROM embeddings WHERE person_id=? AND source=? AND length(vector)=?", (person_id, source, EMBEDDING_DIMENSION * 4)).fetchone()[0] >= SAMPLES:
                         raise FaceError("phone_already_added", "This person already has phone samples. Remove and enroll again to replace them.")
                 db.executemany("INSERT INTO embeddings (person_id, vector, source) VALUES (?, ?, ?)",
                                [(person_id, normalize(vector).tobytes(), source) for vector in vectors])
@@ -422,11 +457,18 @@ def identify_candidates(candidates, claimed_id=None):
     best = candidates[0]
     similarity = round(best["similarity"], 4)
     margin = best['similarity'] - candidates[1]['similarity'] if len(candidates) > 1 else None
-    evidence = {'similarity': similarity, 'match_margin': margin, 'candidate_count': len(candidates)}
+    # Safe to log or return to an authenticated staff client: it contains only
+    # numerical scores, never embeddings, images, or identity labels.
+    diagnostics = {'best_similarity': similarity,
+                   'second_similarity': round(candidates[1]['similarity'], 4) if len(candidates) > 1 else None,
+                   'margin': round(margin, 4) if margin is not None else None,
+                   'candidate_count': len(candidates)}
+    evidence = {'similarity': similarity, 'match_margin': margin, 'candidate_count': len(candidates),
+                'match_diagnostics': diagnostics}
     if best["similarity"] < MATCH_THRESHOLD:
-        return {"status": "unknown", "message": "Face not recognized.", "similarity": similarity}
+        return {"status": "unknown", "message": "Face not recognized.", **evidence}
     if margin is not None and margin < MATCH_MARGIN:
-        return {"status": "ambiguous", "message": "Match is too close to another enrollment. Try again.", "similarity": similarity}
+        return {"status": "ambiguous", "message": "Match is too close to another enrollment. Try again.", **evidence}
     if claimed_id is not None and best["id"] != claimed_id:
-        return {"status": "mismatch", "message": "Face does not match the selected person.", "similarity": similarity}
+        return {"status": "mismatch", "message": "Face does not match the selected person.", **evidence}
     return {"status": "matched", "person": {"id": best["id"], "name": best["name"]}, **evidence}

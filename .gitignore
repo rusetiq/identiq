@@ -1,7 +1,8 @@
 .venv/
 __pycache__/
 .pytest_cache/
-data/
+data/*
+!data/identities.sqlite3
 models/*.onnx
 models/*.part
 .DS_Store

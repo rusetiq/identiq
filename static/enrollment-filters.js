@@ -31,7 +31,7 @@ window.EnrollmentFilters=(()=>{
     select(person){
       this.search.value='';this.grade.value=student(person) && key(person.grade)?'grade:'+key(person.grade):'ungrouped';
       this.render();this.section.value=student(person)?'section:'+key(person.section):'';this.render();
-      if(!person.samples)this.target.value=String(person.id);
+      if(!person.compatible_samples)this.target.value=String(person.id);
       this.phone.value=String(person.id);this.onChange();
     }
     render(){
@@ -47,12 +47,12 @@ window.EnrollmentFilters=(()=>{
       for(const [value,label] of choices(group,'section'))this.section.add(new Option(label,'section:'+value));
       this.section.value=section;if(!this.section.value)this.section.value='';
       const visible=matching(this.people,{grade:this.grade.value,section:this.section.value,query:this.search.value});
-      const pending=visible.filter(person=>!person.samples);
+      const pending=visible.filter(person=>!person.compatible_samples);
       this.target.replaceChildren(new Option(!this.grade.value && !key(this.search.value)?'Select a grade above':pending.length?'Select a registered person':'No people awaiting enrollment',''));
       this.phone.replaceChildren(new Option(visible.length?'Select a school record':'No matching school records',''));
       for(const person of visible){
         const label=`${person.name} · ${person.student_id || person.employee_code || 'Record '+person.id}`;
-        this.phone.add(new Option(label,person.id));if(!person.samples)this.target.add(new Option(label,person.id));
+        this.phone.add(new Option(label,person.id));if(!person.compatible_samples)this.target.add(new Option(label,person.id));
       }
       this.target.value=target;this.phone.value=phone;
       this.summary.textContent=!this.grade.value && !key(this.search.value)?'Select a grade and section, or search by name or admission number.':`${visible.length} records match · ${pending.length} awaiting face enrollment`;

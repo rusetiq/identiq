@@ -8,4 +8,4 @@ Locally served assets from Google's `@mediapipe/tasks-vision` npm package, versi
 - Source/license: https://github.com/google-ai-edge/mediapipe (Apache 2.0)
 - Documentation: https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker/web_js
 
-The dense mesh is estimated from RGB images. It is not physical depth measurement, proof of liveness, or Apple's Face ID data. The app uses it for live visual guidance; identity matching still uses the existing SFace model.
+The dense mesh is estimated from RGB images. It is not physical depth measurement, proof of liveness, or Apple's Face ID data. The app uses it for live visual guidance; identity matching uses the server-side ArcFace model.

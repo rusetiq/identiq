@@ -18,7 +18,7 @@ class FaceTracker {
         const image=this.capture(),data=await this.request(image);
         if(!this.running || generation!==this.generation) return;
         this.accept(data,image,capturedAt);
-        delay=data.face_count ? 400 : Math.min(1200,delay+200);
+        delay=data.face_count ? 250 : Math.min(1200,delay+200);
       }catch(error){
         if(!this.running || generation!==this.generation) return;
         this.readyStreak=0;this.analysis=null;this.highlights=[];
@@ -77,7 +77,7 @@ class FaceTracker {
       }
       if(region.label){
         const expanded=canvas.closest('.camera-expanded');
-        const unit=devicePixelRatio,size=(expanded?Math.max(38,Math.min(84,canvas.clientWidth*.072)):Math.max(20,Math.min(36,canvas.clientWidth*.028)))*unit,pad=8*unit;
+        const unit=devicePixelRatio,size=(expanded?Math.max(16,Math.min(26,canvas.clientWidth*.024)):Math.max(12,Math.min(18,canvas.clientWidth*.016)))*unit,pad=5*unit;
         ctx.font=`600 ${size}px -apple-system, sans-serif`;
         const available=Math.max(1,width-2*pad),chars=Array.from(region.label);let label=chars.join('');
         while(chars.length && ctx.measureText(label).width>available-2*pad){chars.pop();label=chars.join('')+'…';}

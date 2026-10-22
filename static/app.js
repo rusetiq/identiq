@@ -5,7 +5,8 @@ const state = { stream: null, mode: "attendance", scanning: false, enrolling: fa
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let toastTimer;
 const captureCanvas=document.createElement('canvas');
-const liveTracker = new FaceTracker({video: $("video"), canvas: $("overlay"), capture: frame,
+const trackingCanvas=document.createElement('canvas');
+const liveTracker = new FaceTracker({video: $("video"), canvas: $("overlay"), capture: () => frame(trackingCanvas,640,state.mode==='enroll' ? .82 : .62),
   request: image => api("/api/analyze", "POST", {image,group:state.mode==='attendance' || state.mode==='verify' && !$("person-select").value}), onUpdate: updateControls, guide:()=>state.mode==="attendance" && state.activeAttendance && state.movementMode==="automatic" ? {axis:$("crossing-axis").value,direction:$("entry-direction").value} : null, pause:()=>document.hidden || state.savingEnrollment || state.scanning && (state.scanSessionId || !$("person-select").value)});
 let cancelEnrollment = false;
 const recentCheckIns=new Map();
@@ -65,7 +66,7 @@ function updateControls() {
   $("attendance-scan").disabled = state.attendanceBusy || state.enrolling || !state.stream || !state.ready || !state.activeAttendance;
   $("end-session").disabled = state.attendanceBusy || state.enrolling;
   $("attendance-tab").disabled = state.enrolling;
-  $("recognize").disabled = !state.stream || !state.ready || !state.people.some(person=>person.samples>0) || state.enrolling;
+  $("recognize").disabled = !state.stream || !state.ready || !state.people.some(person=>person.compatible_samples>0) || state.enrolling;
   $("capture").disabled = !state.stream || !state.ready || state.enrolling || liveTracker.readyStreak < 2 || !$("enroll-person").value;
   $("stop-camera").disabled = !state.stream && !state.cameraStarting;
   $("stop-camera").textContent = state.cameraStarting && !state.stream ? "Cancel connection" : "Turn off camera";
@@ -105,16 +106,14 @@ function drawBox(box, matched, name) {
   showCameraNames(name ? [{name,detail:matched ? "Verified" : "Confirming match",matched}] : []);
 }
 
-function frame() {
+function frame(canvas=captureCanvas, maxSide=960, jpegQuality=.86) {
   const video = $("video");
   if (!state.stream || !video.videoWidth || video.readyState < 2) throw new Error("The camera is not ready yet.");
-  const canvas = captureCanvas;
-  const limit=state.mode==='attendance' || state.mode==='verify' && !$("person-select").value ? 1600 : 960;
-  const ratio = Math.min(1, limit / video.videoWidth, limit / video.videoHeight);
+  const ratio = Math.min(1, maxSide / video.videoWidth, maxSide / video.videoHeight);
   const width=Math.round(video.videoWidth*ratio),height=Math.round(video.videoHeight*ratio);
   if(canvas.width!==width || canvas.height!==height){canvas.width=width;canvas.height=height;}
   canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-  const image=canvas.toDataURL("image/jpeg", .88);
+  const image=canvas.toDataURL("image/jpeg", jpegQuality);
   return image.length>1900000 ? canvas.toDataURL("image/jpeg", .70) : image;
 }
 
@@ -209,7 +208,7 @@ async function refreshPeople() {
   for(const value of [...new Set(state.people.map(person=>person.academic_year).filter(Boolean))].sort())$("session-year").add(new Option(value,value));
   $("session-year").value=year;
   $("person-select").replaceChildren(new Option("Recognize anyone enrolled", ""));
-  state.people.filter(person=>person.samples>0).forEach(person => $("person-select").add(new Option(person.name, person.id)));
+  state.people.filter(person=>person.compatible_samples>0).forEach(person => $("person-select").add(new Option(person.name, person.id)));
   if (state.people.some(person => String(person.id) === selected)) $("person-select").value = selected;
   $("people-list").replaceChildren();
   if (!state.people.length) {
@@ -224,14 +223,15 @@ async function refreshPeople() {
     const info = document.createElement("div");info.className = "person-info";
     const name = document.createElement("strong");name.textContent = person.name;
     const meta = document.createElement("p");
-    meta.textContent = `ID ${String(person.id).padStart(3,"0")} · ${person.samples} samples${person.iphone_samples ? " · iPhone added" : ""} · Added ${new Date(person.created_at).toLocaleDateString(undefined,{month:"short",day:"numeric"})}`;
+    const enrollment=person.compatible_samples ? `${person.compatible_samples} ArcFace samples` : person.samples ? 'Re-enroll for ArcFace' : 'No face samples';
+    meta.textContent = `ID ${String(person.id).padStart(3,"0")} · ${enrollment}${person.iphone_samples ? " · iPhone added" : ""} · Added ${new Date(person.created_at).toLocaleDateString(undefined,{month:"short",day:"numeric"})}`;
     info.append(name,meta);
     const school=document.createElement('p');school.textContent=[person.person_type==='staff' ? `Staff · ${person.employee_code}` : person.student_id && `Admission: ${person.student_id}`,person.class_name,person.academic_year].filter(Boolean).join(' · ');info.append(school);
     const edit=document.createElement('button');edit.className='text-button';edit.textContent='Edit details';edit.setAttribute('aria-label',`Edit details for ${person.name}`);edit.onclick=()=>openStudentProfile(person);
-    const status = document.createElement("span");status.className = "person-status";status.textContent=person.samples ? 'FACE ENROLLED' : 'AWAITING FACE';
+    const status = document.createElement("span");status.className = "person-status";status.textContent=person.compatible_samples ? 'FACE ENROLLED' : person.samples ? 'RE-ENROLL REQUIRED' : 'AWAITING FACE';
     const remove = document.createElement("button");remove.className = "text-button";remove.textContent = "Remove";remove.setAttribute("aria-label",`Remove ${person.name}`);
     remove.onclick = () => askDelete(person);
-    const capture=document.createElement('button');capture.className='text-button';capture.textContent='Enroll face';capture.hidden=person.samples>0;capture.onclick=()=>{setMode('enroll');setSource('laptop');enrollmentFilters.select(person);$('enroll-panel').scrollIntoView({behavior:'smooth',block:'center'});};
+    const capture=document.createElement('button');capture.className='text-button';capture.textContent=person.compatible_samples ? 'Enroll face' : person.samples ? 'Re-enroll face' : 'Enroll face';capture.hidden=person.compatible_samples>0;capture.onclick=()=>{setMode('enroll');setSource('laptop');enrollmentFilters.select(person);$('enroll-panel').scrollIntoView({behavior:'smooth',block:'center'});};
     row.append(avatar,info,status,capture,edit,remove);$("people-list").append(row);
   }
   updateControls();
@@ -250,14 +250,30 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
   const groupStreaks = new Map();
   const generation = ++state.generation;
   let failures=0;
+  // Keep only the newest frame while inference is running. A deeper queue
+  // makes a slow tablet process old camera images and feel increasingly late.
+  // Frames are never written to disk and are discarded when scanning stops.
+  const frameQueue=[];
+  const queueFrame=()=>{
+    if(!attendanceSessionId || !state.scanning || !state.stream || frameQueue.length)return;
+    try {
+      const image=frame(captureCanvas,800,.72);
+      if(state.scanning && generation===state.generation && frameQueue.length<5)frameQueue.push({image,capturedAt:performance.now()});
+    } catch(error) {}
+  };
+  const queueTimer=attendanceSessionId?setInterval(queueFrame,300):null;
+  if(attendanceSessionId)queueFrame();
   $("recognize").textContent = "Pause recognition";
   if (attendanceSessionId) $("attendance-scan").textContent = "Pause attendance scan";
   $("feed-label").textContent = attendanceSessionId ? "TAKING ATTENDANCE" : "RECOGNIZING";
   updateControls();
-  while (state.scanning && generation === state.generation && state.stream) {
-    try {
+  try {
+    while (state.scanning && generation === state.generation && state.stream) {
+      try {
       const selected = $("person-select").value;
-      const capturedAt=performance.now(),image=frame();
+      if(attendanceSessionId && !frameQueue.length)queueFrame();
+      const queued=attendanceSessionId?frameQueue.shift():null;
+      const capturedAt=queued?.capturedAt ?? performance.now(),image=queued?.image ?? frame(captureCanvas,attendanceSessionId ? 800 : 800,.72);
       const requestStarted=performance.now();
       const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {...sharedContext,attendance_session_id: attendanceSessionId, scanner_id: scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value} : {}) }, scanAbort.signal);
       if (!state.scanning || generation !== state.generation) break;
@@ -266,29 +282,31 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       failures=0;
       if(group) {
         liveTracker.accept(data,image,capturedAt);await showGroupResults(data,groupStreaks,attendanceSessionId);
-        await sleep(window.IdentiqScan?.delay(data,!!attendanceSessionId) ?? (attendanceSessionId ? (data.face_count ? 250 : 600) : 650));
+        const delay=frameQueue.length ? 0 : window.IdentiqScan?.delay(data,!!attendanceSessionId) ?? (attendanceSessionId ? (data.face_count ? 250 : 600) : 650);
+        if(delay)await sleep(delay);
         continue;
       }
       if (data.status === "matched") {
         state.streak = state.candidate === data.person.id ? state.streak + 1 : 1;
         state.candidate = data.person.id;
         const confirmed = attendanceSessionId ? data.attendance?.status === "present" : state.streak >= 3;
-        result(confirmed ? data.person.name : "Confirming match…", confirmed ? `Identity ${selected ? "verified" : "recognized"} · Database ID ${data.person.id}` : `${state.streak} of 3 consecutive matches`, confirmed ? "matched" : "", data.similarity);
+        const provisional=attendanceSessionId && data.attendance?.status==='confirming';
+        result(confirmed || provisional ? data.person.name : "Confirming match…", confirmed ? `Identity ${selected ? "verified" : "recognized"} · Database ID ${data.person.id}` : provisional ? `Provisional match · ${data.attendance.confirmations} of ${data.attendance.required_confirmations} confirmations · not marked present yet` : `${state.streak} of 3 consecutive matches`, confirmed ? "matched" : "", data.similarity);
         if (attendanceSessionId) {
           const attendance = data.attendance;
           if (attendance.status === "present") {
             result(data.person.name, "Marked present for this session.", "matched", data.similarity);
             if (attendance.newly_present) { toast(`${data.person.name} marked present.`); await refreshAttendance(attendanceSessionId); }
-          } else if (attendance.status === "confirming") result("Confirming attendance…", `${attendance.confirmations} of ${attendance.required_confirmations} fresh matches · hold still`, "", data.similarity);
+          } else if (attendance.status === "confirming") result(data.person.name, `Provisional match · ${attendance.confirmations} of ${attendance.required_confirmations} confirmations · not marked present yet`, "", data.similarity);
           else result("Face needs review", attendance.message, "warning", data.similarity);
         }
-        drawBox(data.box, confirmed, confirmed ? data.person.name : "Confirming face…");
+        drawBox(data.box, confirmed, confirmed || provisional ? data.person.name : "Confirming face…");
       } else {
         state.streak = 0;state.candidate = null;
         result({unknown:"Unknown face",ambiguous:"Uncertain match",mismatch:"Identity mismatch",empty:"No enrolled faces"}[data.status] || "Try again",data.message,"warning",data.similarity ?? null);
         drawBox(data.box,false);
       }
-    } catch (error) {
+      } catch (error) {
       if (!state.scanning || generation !== state.generation) break;
       if(transientError(error)){
         clearBox();groupStreaks.clear();result('Reconnecting…','Scan remains enabled. Waiting for the server.');
@@ -299,8 +317,12 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       groupStreaks.clear();showCameraNames([]);$("scan-face-results").replaceChildren();$("scan-face-results").hidden=true;
       result("Adjust your camera view",error.message,"warning");
       if (!["no_face","multiple_faces","blurry","too_small","uncertain_detection","quality"].includes(error.code)) { stopScan();toast(error.message);break; }
+      }
+      await sleep(attendanceSessionId && frameQueue.length ? 0 : attendanceSessionId ? 40 : 650);
     }
-    await sleep(attendanceSessionId ? 40 : 650);
+  } finally {
+    if(queueTimer)clearInterval(queueTimer);
+    frameQueue.length=0;
   }
 }
 
@@ -318,7 +340,12 @@ async function showGroupResults(data,streaks,sessionId) {
       if(matched) {confirmed++;detail=sessionId ? face.attendance.status==='manual_override' ? 'Present · staff correction' : face.attendance.campus_state==='checked_out' ? 'Checked out' : 'Checked in' : 'Recognized';}
       else if(!sessionId || face.attendance.status==='confirming') {confirming++;detail=`${sessionId ? face.attendance.confirmations : streaks.get(face.person.id)} of ${sessionId ? face.attendance.required_confirmations : 3} fresh matches · hold still`;}
       else detail=face.attendance.status==='manual_override' ? `Staff marked ${face.attendance.attendance_status}. Camera status kept unchanged.` : face.attendance.message;
-      if(!matched) name=(!sessionId || face.attendance.status==='confirming') ? 'Confirming face…' : 'Face needs review';
+      if(!matched) {
+        if(sessionId && face.attendance?.status==='confirming') {
+          name=face.person.name;
+          detail=`Provisional match · ${face.attendance.confirmations} of ${face.attendance.required_confirmations} confirmations · not marked present yet`;
+        } else name=!sessionId ? 'Confirming face…' : 'Face needs review';
+      }
       if(face.attendance?.newly_moved || face.attendance?.newly_present) newlyPresent.push(`${name} ${face.attendance.action==='check_out' ? 'checked out' : 'checked in'}`);
     } else if(face.status==='ambiguous') name='Uncertain match';
     const row=document.createElement('div');row.className=`scan-face-row ${matched?'confirmed':face.status==='matched'?'confirming':'warning'}`;
@@ -480,6 +507,7 @@ async function initializeApp(){
     await refreshPeople();
     await refreshAttendance();
     if(!state.ready){toast("Face models are missing. Run python scripts/download_models.py.");result("Setup needed","Download the face models, then reload this page.","warning");}
+    else if(status.reenrollment_required){result("Re-enrollment required",`${status.reenrollment_required} profile${status.reenrollment_required===1?'':'s'} still use the previous model. Select each profile and enroll new face samples before scanning.`,"warning");}
     else if(state.activeAttendance) result("Session in progress","Enable the camera and start attendance scan to continue.");
     else if(state.people.length) result("Ready to take attendance","Name your session, then click Start session.");
   }catch(error){

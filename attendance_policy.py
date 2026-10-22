@@ -5,7 +5,7 @@ liveness checks. Change them only after evaluating the deployment's cameras.
 """
 import math
 
-MATCH_THRESHOLD = 0.60
+MATCH_THRESHOLD = 0.65
 MATCH_MARGIN = 0.12
 CONFIRMATIONS = 3
 MIN_INTERVAL = 0.25

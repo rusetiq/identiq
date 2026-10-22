@@ -3,7 +3,7 @@ import uuid
 import numpy as np
 import pytest
 
-from biometrics import FaceError, MAX_FACES
+from biometrics import FaceError, MAX_FACES, EMBEDDING_DIMENSION
 from test_app import setup, image, vector, enroll, fresh_image
 from test_attendance import start, clock
 from test_tracking import engine, face, smooth_image
@@ -173,7 +173,7 @@ def test_twenty_faces_are_accepted_and_the_twenty_first_is_over_capacity():
     detector=engine(np.repeat(face(),20,axis=0));detector.recognizer=Recognizer()
     result=detector.extract_group(smooth_image())
     assert MAX_FACES==20 and result['face_count']==20 and len(result['faces'])==20
-    assert all(person['status']=='ready' and person['embedding'].shape==(128,) for person in result['faces'])
+    assert all(person['status']=='ready' and person['embedding'].shape==(EMBEDDING_DIMENSION,) for person in result['faces'])
     detector.detector.faces=np.repeat(face(),21,axis=0)
     assert detector.extract_group(smooth_image())['code']=='too_many_faces'
 

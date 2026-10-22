@@ -1,5 +1,6 @@
 import json
 import hashlib
+import logging
 import os
 from pathlib import Path
 import secrets
@@ -14,7 +15,7 @@ from flask_sock import Sock
 from simple_websocket import ConnectionClosed
 from shared_camera import SharedCamera
 
-from biometrics import FaceEngine, FaceError, MAX_FACES, SAMPLES, Store, decode_frame, identify, identify_candidates
+from biometrics import EMBEDDING_DIMENSION, FaceEngine, FaceError, MAX_FACES, SAMPLES, Store, decode_frame, identify, identify_candidates
 from attendance_policy import MATCH_THRESHOLD, CONFIRMATIONS
 from iphone import valid_name, validate_capture
 from attendance import Attendance
@@ -23,7 +24,27 @@ from build_info import installed_build
 from web_assets import WebAssets
 from database_transfer import create_backup, merge_backup
 
+import ssl
+
 ROOT = Path(__file__).resolve().parent
+recognition_log = logging.getLogger("identiq.recognition")
+
+
+class _QuietDisconnectFilter(logging.Filter):
+    def filter(self, record):
+        if record.exc_info and len(record.exc_info) > 1 and record.exc_info[1] is not None:
+            exc = record.exc_info[1]
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                return False
+            if isinstance(exc, ssl.SSLError) and 'UNEXPECTED_EOF_WHILE_READING' in str(exc):
+                return False
+        msg = record.getMessage()
+        if 'BrokenPipeError' in msg or 'UNEXPECTED_EOF_WHILE_READING' in msg:
+            return False
+        return True
+
+
+logging.getLogger("werkzeug").addFilter(_QuietDisconnectFilter())
 
 
 def create_app(database=None, engine=None, allowed_hosts=None):
@@ -55,13 +76,21 @@ def create_app(database=None, engine=None, allowed_hosts=None):
         with engine_lock:
             if engine is None:
                 if not models_ready():
-                    raise FaceError("models_missing", "Install the face models: python scripts/download_models.py")
+                    raise FaceError("models_missing", "Install the research face models: python scripts/download_models.py")
                 engine = FaceEngine(ROOT / "models")
             return engine
 
     def models_ready():
         return engine is not None or all((ROOT / "models" / name).is_file() for name in (
-            "face_detection_yunet_2023mar.onnx", "face_recognition_sface_2021dec.onnx"))
+            "face_detection_yunet_2023mar.onnx", "arcface_w600k_r50.onnx"))
+
+    def log_match_diagnostic(recognition):
+        diagnostic = recognition.get('match_diagnostics')
+        if diagnostic:
+            recognition_log.info('decision=%s best=%s second=%s margin=%s candidates=%s',
+                                 recognition.get('status'), diagnostic['best_similarity'],
+                                 diagnostic['second_similarity'], diagnostic['margin'],
+                                 diagnostic['candidate_count'])
 
     def cookie_name(role):
         suffix = app.config.get('PORTAL_COOKIE_SUFFIX','') if not request.is_secure else ''
@@ -183,7 +212,10 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.get("/api/status")
     def status():
-        return jsonify(models_ready=models_ready(), people=len(store.people()), threshold=MATCH_THRESHOLD, samples=SAMPLES,
+        profiles = store.people()
+        return jsonify(models_ready=models_ready(), people=len(profiles), threshold=MATCH_THRESHOLD, samples=SAMPLES,
+                       embedding_dimension=EMBEDDING_DIMENSION,
+                       reenrollment_required=sum(person['samples'] > 0 and person['compatible_samples'] == 0 for person in profiles),
                        attendance_confirmations=CONFIRMATIONS)
 
     @app.get('/api/client-context')
@@ -375,6 +407,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             else:
                 vector, box = get_engine().extract(frame)
             recognition = identify(store, vector, claimed_id)
+            log_match_diagnostic(recognition)
         except FaceError:
             if session_id is not None:
                 attendance.reset(session_id, scanner_id)
@@ -410,7 +443,10 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             faces = []
             for face in result['faces']:
                 details = {key:value for key,value in face.items() if key != 'embedding'}
-                faces.append({**details, **next(matches)} if face['status'] == 'ready' else details)
+                identified = next(matches) if face['status'] == 'ready' else None
+                if identified:
+                    log_match_diagnostic(identified)
+                faces.append({**details, **identified} if identified else details)
             counts = {}
             for face in faces:
                 if face['status'] == 'matched':
