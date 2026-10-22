@@ -70,3 +70,29 @@ guardianElement('staff-account-form').onsubmit=async event=>{
   catch(issue){error.textContent=issue.message;error.hidden=false;}
   finally{guardianElement('save-staff-account').disabled=false;}
 };
+
+guardianElement('database-transfer-form').onsubmit=async event=>{
+  event.preventDefault();
+  const file=guardianElement('database-backup-file').files[0];
+  const message=guardianElement('database-transfer-message'),button=guardianElement('merge-database-backup');
+  if(!file)return;
+  if(!window.confirm(`Merge “${file.name}” into this server? Existing records stay. Active sessions from the backup are imported as closed. Staff login details are not transferred.`))return;
+  button.disabled=true;message.hidden=false;message.classList.remove('error');message.textContent='Uploading and merging the backup…';
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),120000);
+  try{
+    const form=new FormData();form.append('backup',file);
+    const response=await fetch('/api/staff/database-backup/merge',{method:'POST',body:form,signal:controller.signal,headers:{'X-Local-Token':document.querySelector('meta[name="local-token"]').content},cache:'no-store'});
+    const result=await response.json().catch(()=>({error:'The server returned an unreadable response.'}));
+    if(response.status===401){window.location.assign('/?expired=1');return;}
+    if(!response.ok)throw new Error(result.error||'The backup could not be merged.');
+    if(result.already_imported){message.textContent='This laptop’s backup was already merged. No duplicate records were added.';}
+    else{
+      const parts=[`${result.people_added} new people`,`${result.people_matched} matched profiles`,`${result.face_samples_added} face samples`,`${result.sessions_added} sessions`,`${result.attendance_records_added} attendance records`,`${result.parent_accounts_added} parent accounts`];
+      if(result.parent_accounts_skipped)parts.push(`${result.parent_accounts_skipped} parent accounts skipped because their login already exists or their student was missing`);
+      message.textContent=`Backup merged: ${parts.join(', ')}.`;
+      window.dispatchEvent(new CustomEvent('database-merged'));
+    }
+    guardianElement('database-transfer-form').reset();
+  }catch(error){message.textContent=error.name==='AbortError'?'The upload took too long. Check the server before trying again.':error.message;message.classList.add('error');}
+  finally{clearTimeout(timer);button.disabled=false;}
+};

@@ -236,6 +236,7 @@ async function refreshPeople() {
   }
   updateControls();
 }
+window.addEventListener('database-merged',()=>refreshPeople().catch(error=>toast(error.message)));
 
 async function scan(attendanceSessionId = null, sharedExecution = false) {
   if(attendanceSessionId && !sharedExecution && window.sharedRoom)return window.sharedRoom.toggleScan();

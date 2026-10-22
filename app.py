@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import secrets
 import threading
+import tempfile
 import time
 from urllib.parse import urlsplit
 
@@ -20,6 +21,7 @@ from attendance import Attendance
 from parent_portal import PortalAccess
 from build_info import installed_build
 from web_assets import WebAssets
+from database_transfer import create_backup, merge_backup
 
 ROOT = Path(__file__).resolve().parent
 
@@ -30,7 +32,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     assets = WebAssets(ROOT/'static',running_build)
     app.config['IDENTIQ_BUILD']=running_build
     permitted_hosts = {'localhost', '127.0.0.1'} | set(allowed_hosts or ())
-    app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
+    app.config["MAX_CONTENT_LENGTH"] = 128 * 1024 * 1024
     token = secrets.token_urlsafe(32)
     store = Store(database or ROOT / "data" / "identities.sqlite3")
     attendance = Attendance(store)
@@ -69,6 +71,9 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     def local_only():
         if request.host.split(":")[0].lower() not in permitted_hosts:
             return jsonify(error="Use the configured address for this server.", code="invalid_host"), 403
+        if (request.path != '/api/staff/database-backup/merge' and request.content_length
+                and request.content_length > 12 * 1024 * 1024):
+            return jsonify(error='That request is too large.', code='request_too_large'), 413
         if request.method in {"POST", "DELETE", "PUT", "PATCH"}:
             origin = request.headers.get("Origin")
             if origin and urlsplit(origin).netloc != request.host:
@@ -259,6 +264,40 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.get('/api/staff/account')
     def staff_account():return jsonify(access.staff_account())
+
+    @app.get('/api/staff/database-backup')
+    def download_database_backup():
+        descriptor, path = tempfile.mkstemp(prefix='identiq-backup-', suffix='.sqlite3', dir=store.path.parent)
+        os.close(descriptor)
+        backup_path = Path(path)
+        try:
+            create_backup(store, backup_path)
+        except Exception:
+            backup_path.unlink(missing_ok=True)
+            raise
+        response = send_file(backup_path, mimetype='application/vnd.sqlite3', as_attachment=True,
+                             download_name='identiq-database-backup.sqlite3', conditional=False)
+        response.call_on_close(lambda: backup_path.unlink(missing_ok=True))
+        return response
+
+    @app.post('/api/staff/database-backup/merge')
+    def merge_database_backup():
+        upload = request.files.get('backup')
+        if upload is None or not upload.filename:
+            raise FaceError('backup_required', 'Choose an Identiq database backup file.')
+        descriptor, path = tempfile.mkstemp(prefix='identiq-import-', suffix='.sqlite3', dir=store.path.parent)
+        os.close(descriptor)
+        import_path = Path(path)
+        try:
+            upload.save(import_path)
+            import_path.chmod(0o600)
+            result = merge_backup(store, import_path)
+        except ValueError as error:
+            raise FaceError('invalid_backup', str(error)) from error
+        finally:
+            import_path.unlink(missing_ok=True)
+        shared.attendance_changed()
+        return jsonify(merged=True, **result)
 
     @app.patch('/api/staff/account')
     def update_staff_account():
