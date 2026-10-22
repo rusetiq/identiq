@@ -162,3 +162,13 @@ Attendance checks face quality before embedding extraction, scores the full dire
 After a scan, open **Connection check** to compare **Scan request round trip** with **Scan server processing**. These refer to the last successful camera request, with its time and face count shown. The separate **Server response** row measures the connection check itself. Request round trip includes upload, server handling, network transit and browser response handling; server scan processing covers the recognition route, not pure model inference. Diagnostics do not retain names, camera frames or face patterns.
 
 See `PERFORMANCE.md` for the synthetic matching benchmark and its limits. Pull the changes, restart the server and refresh the tablet page to load the updated scan scheduler.
+
+## Weak Wi-Fi and moving between floors
+
+Styling is delivered inside each HTML page, with an exact CSP hash, so it does not depend on a second CSS request completing. Pages and records remain `no-store`. Public first-party JavaScript/CSS files are precompressed and cached using their build-version URLs, with encoding-specific ETags; unversioned or mismatched URLs must revalidate. File bytes remain frozen for the running build until the server restarts. There is no offline cache of student records, credentials, camera frames or attendance writes.
+
+Shared preview now uses a smaller 480-pixel image at up to two frames per second. On a slow recent scan request, a reported low-bandwidth connection or Data Saver, it uses 360 pixels and at most one frame per second. A backed-up socket drops preview captures rather than continually queuing them. This changes the remote viewing preview; recognition requests keep their existing image resolution and JPEG quality, and all attendance safeguards still apply.
+
+**Connection check** makes five small requests, reports how many succeeded and the slowest successful response, and stops when the dialog closes. Follow-up requests have a 2.5-second deadline. These are HTTP reachability samples, not a Wi-Fi signal measurement or proof of continuous connectivity. Compare results downstairs and upstairs with the camera page kept open.
+
+If the entire app becomes unreachable only upstairs, school IT needs to verify upstairs access-point coverage, roaming and routing/firewall access to the attendance laptop's configured IP and port 8443 (and 8080 if HTTP viewing is used). Keep the laptop awake and the server running. An internet connection alone does not establish access to the private attendance server. Caching and smaller previews reduce app traffic; they cannot repair a missing network route or coverage gap. Live recognition cannot mark attendance while the laptop is unreachable.

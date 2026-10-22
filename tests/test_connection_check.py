@@ -1,4 +1,6 @@
 import re
+import base64
+import hashlib
 from app import create_app
 from build_info import installed_build
 from test_app import setup
@@ -32,7 +34,10 @@ def test_all_pages_load_network_helper_first_and_version_every_asset(setup):
         scripts=re.findall(r'<script[^>]+src="([^"]+)"',html)
         assert scripts[0]==f'/static/network.js?v={version}'
         assert all(f'v={version}' in path for path in scripts)
-        assert f'/static/style.css?v={version}' in html
+        style=re.search(r'<style>(.*?)</style>',html,re.S).group(1)
+        digest=base64.b64encode(hashlib.sha256(style.encode()).digest()).decode()
+        assert "'sha256-"+digest+"'" in page.headers['Content-Security-Policy']
+        assert 'stylesheet' not in html
         assert 'Connection check' in html
 
 

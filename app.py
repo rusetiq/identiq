@@ -19,6 +19,7 @@ from iphone import valid_name, validate_capture
 from attendance import Attendance
 from parent_portal import PortalAccess
 from build_info import installed_build
+from web_assets import WebAssets
 
 ROOT = Path(__file__).resolve().parent
 
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parent
 def create_app(database=None, engine=None, allowed_hosts=None):
     app = Flask(__name__)
     running_build=installed_build()
+    assets = WebAssets(ROOT/'static',running_build)
     app.config['IDENTIQ_BUILD']=running_build
     permitted_hosts = {'localhost', '127.0.0.1'} | set(allowed_hosts or ())
     app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
@@ -38,7 +40,8 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     sock=Sock(app)
     @app.context_processor
     def stylesheet_version():
-        return {'style_version':running_build,'build_version':running_build,'max_faces':MAX_FACES}
+        return {'style_version':running_build,'build_version':running_build,'max_faces':MAX_FACES,
+                'style_source':assets.stylesheet}
 
     access = PortalAccess(store)
     app.extensions["portal_access"] = access
@@ -90,13 +93,23 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     def headers(response):
         if response.status_code<400 and request.method in {"POST","PATCH","DELETE"} and request.path.startswith("/api/attendance/"):
             shared.attendance_changed()
-        response.headers["Cache-Control"] = "no-store"
+        public_asset = (request.endpoint == 'static' and response.status_code in (200,304)
+                        and assets.contains((request.view_args or {}).get('filename')))
+        if not public_asset:
+            response.headers["Cache-Control"] = "no-store"
+        assets.compress_page(response)
         response.headers['X-Identiq-Build']=running_build
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(self), microphone=()"
-        response.headers["Content-Security-Policy"] = f"default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self' ws://{request.host} wss://{request.host}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = f"default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'sha256-{assets.style_hash}'; script-src 'self'; connect-src 'self' ws://{request.host} wss://{request.host}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         return response
+
+    @app.before_request
+    def cached_asset():
+        filename = (request.view_args or {}).get('filename')
+        if request.endpoint == 'static' and request.method in ('GET','HEAD') and assets.contains(filename):
+            return assets.serve(filename)
 
     @app.errorhandler(FaceError)
     def face_error(error):

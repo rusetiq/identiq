@@ -16,6 +16,12 @@ The 0.60 similarity threshold, 0.12 runner-up margin, three-frame confirmation, 
 
 Validation for this update: 174 Python checks and 22 JavaScript checks passed, including tied candidate scores, selected-person claims, group query counts, early quality rejection, three-frame pacing, last-seen refreshes and diagnostic privacy. These use synthetic inputs and controlled inference, not a field accuracy benchmark.
 
+## Weak-connection delivery update
+
+The 13 first-party CSS/JavaScript assets measured 132,379 bytes before compression and 39,062 bytes with startup gzip compression, about 70.5% smaller in aggregate (sizes vary with later changes). Versioned public assets can be reused without redownloading, and HTML includes its own stylesheet with a matching CSP hash. HTML is gzip-compressed when accepted while remaining `no-store`; private APIs and records are not cached.
+
+Shared preview traffic is reduced independently of recognition image quality: normal previews use 480 pixels/up to 2 FPS, constrained previews 360 pixels/up to 1 FPS, and socket backpressure suppresses additional preview captures. Connection diagnostics sample five bounded requests instead of relying on one successful response. This has not been measured on the school's second-floor Wi-Fi and cannot establish or repair network coverage/routing.
+
 ## Earlier baseline from 8 October 2026
 
 Measured locally on 8 October 2026 with 1,000 synthetic identities, 5,000 normalized face embeddings and eight queries per frame. The previous code took 46.17 ms (median of six runs). Batched cached matching takes 1.55 ms (median of 20 warm runs); first-load time is 10.26 ms. This measures database loading and candidate scoring, excluding camera capture, detection and embedding inference. It is not an overall FPS or accuracy claim.

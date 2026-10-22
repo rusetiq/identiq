@@ -5,7 +5,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="local-token" content="{{ token }}"><meta name="theme-color" content="#fafafa">
   <title>Identiq · Attendance</title><link rel="icon" href="data:,">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=style_version) }}">
+  <style>{{ style_source | safe }}</style>
   <script defer src="{{ url_for('static', filename='live-face.js', v=build_version) }}"></script>
   <script defer src="{{ url_for('static', filename='enrollment-filters.js', v=build_version) }}"></script>
   <script defer src="{{ url_for('static', filename='scan-schedule.js', v=build_version) }}"></script>

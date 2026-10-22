@@ -111,18 +111,26 @@ class SharedRoom {
       updateControls();liveTracker.render();
     }finally{this.applying=false;}
   }
+  previewOptions(){
+    const link=navigator.connection,scan=window.IdentiqScan?.last();
+    const limited=!!(link?.saveData || ['slow-2g','2g'].includes(link?.effectiveType)
+      || link?.downlink>0 && link.downlink<1.5
+      || scan && Date.now()-scan.recorded_at<15000 && scan.request_ms>1000);
+    return {interval:limited || !this.snapshot?.viewers ? 1000 : 500,width:limited?360:480,quality:limited ? .5 : .65,limited};
+  }
   publish(){
     if(!this.source || !state.stream || !this.connected || state.mode!=='attendance' || this.encoding)return;
-    const now=performance.now();if(now-this.lastUpload<(this.snapshot.viewers ? 250 : 1000) || this.socket.bufferedAmount>350000)return;
+    const options=this.previewOptions(),now=performance.now();
+    if(now-this.lastUpload<options.interval || this.socket.bufferedAmount>64000)return;
     const video=$('video');if(!video.videoWidth || video.readyState<2)return;
     this.lastUpload=now;
-    const canvas=this.canvas,height=Math.max(1,Math.min(720,Math.round(640*$('viewfinder').clientHeight/$('viewfinder').clientWidth)));
-    if(canvas.width!==640 || canvas.height!==height){canvas.width=640;canvas.height=height;}
+    const canvas=this.canvas,width=options.width,height=Math.max(1,Math.min(Math.round(width*1.125),Math.round(width*$('viewfinder').clientHeight/$('viewfinder').clientWidth)));
+    if(canvas.width!==width || canvas.height!==height){canvas.width=width;canvas.height=height;}
     const ctx=canvas.getContext('2d'),scale=Math.min(canvas.width/video.videoWidth,canvas.height/video.videoHeight),w=video.videoWidth*scale,h=video.videoHeight*scale;
     ctx.fillStyle='#24282e';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.save();ctx.translate(canvas.width,0);ctx.scale(-1,1);ctx.drawImage(video,(canvas.width-w)/2,(canvas.height-h)/2,w,h);ctx.restore();
     const overlay=$('overlay');if(overlay.width && overlay.height)ctx.drawImage(overlay,0,0,canvas.width,canvas.height);
     this.encoding=true;const socket=this.socket,key=this.resumeKey;
-    canvas.toBlob(blob=>{this.encoding=false;if(blob && this.source && this.connected && this.socket===socket && this.resumeKey===key && socket.bufferedAmount<350000)this.send(blob);},'image/jpeg',.72);
+    canvas.toBlob(blob=>{this.encoding=false;if(blob && this.source && this.connected && this.socket===socket && this.resumeKey===key && socket.bufferedAmount<64000)this.send(blob);},'image/jpeg',options.quality);
   }
   showPreview(blob){
     if(this.source || !this.snapshot?.ready || state.mode!=='attendance')return;
