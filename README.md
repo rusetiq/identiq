@@ -154,3 +154,11 @@ Group attendance now permits up to 20 faces in one frame. This is a processing l
 A single face match no longer writes attendance. Similarity, the runner-up margin, image quality, face continuity and fresh-frame confirmation are enforced on the server for both single-face and group camera routes, including walking-direction mode. Staff movement notes include the number of confirmation frames and their lowest match similarity. Manual corrections remain authoritative.
 
 Existing attendance is not retroactively changed: the app cannot determine which past matches were wrong. Staff should correct the affected records in the roster. A face pattern enrolled under the wrong student's name must be removed and enrolled under the correct record. Photos, videos and consistently mistaken matches remain possible without validated liveness and deployment-specific accuracy evaluation; use staff verification for disputed or uncertain cases. Restart the server after pulling these updates, then reload the tablet page.
+
+## Scan efficiency and diagnostics
+
+Attendance checks face quality before embedding extraction, scores the full directory while retaining just the exact best two candidates, and loads each group's roster records with one database query. The camera follows the server's confirmation delay instead of repeatedly sending frames too early to count. Existing match thresholds and confirmation requirements still apply. Last-seen refreshes are limited to once every five seconds per checked-in record; actual arrival and departure timestamps are saved immediately.
+
+After a scan, open **Connection check** to compare **Scan request round trip** with **Scan server processing**. These refer to the last successful camera request, with its time and face count shown. The separate **Server response** row measures the connection check itself. Request round trip includes upload, server handling, network transit and browser response handling; server scan processing covers the recognition route, not pure model inference. Diagnostics do not retain names, camera frames or face patterns.
+
+See `PERFORMANCE.md` for the synthetic matching benchmark and its limits. Pull the changes, restart the server and refresh the tablet page to load the updated scan scheduler.

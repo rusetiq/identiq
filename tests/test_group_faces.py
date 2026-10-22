@@ -41,6 +41,25 @@ def test_one_bad_face_does_not_block_a_good_face():
     assert 'embedding' not in result['faces'][1]
 
 
+@pytest.mark.parametrize('reason',['small','detection'])
+def test_attendance_rejects_unusable_faces_before_recognition_work(reason):
+    detector=group_engine();calls=[]
+    class CountingRecognizer(Recognizer):
+        def feature(self,x):
+            calls.append(x)
+            return super().feature(x)
+    detector.recognizer=CountingRecognizer()
+    if reason=='small':detector.detector.faces[1,2:4]=80
+    else:detector.detector.faces[1,14]=.8
+    picture=np.random.default_rng(42).integers(0,256,(512,512,3),dtype=np.uint8)
+    assert detector.extract_group(picture)['ready_count']==2
+    calls.clear()
+    result=detector.extract_attendance_group(picture)
+    assert result['ready_count']==1 and len(calls)==1
+    assert result['faces'][1]['code']==('too_small' if reason=='small' else 'uncertain_detection')
+    assert 'embedding' not in result['faces'][1]
+
+
 def test_empty_and_over_capacity_groups_do_not_extract():
     assert engine(None).extract_group(smooth_image())['faces']==[]
     result=engine(np.repeat(face(),MAX_FACES+1,axis=0)).extract_group(smooth_image())

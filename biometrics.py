@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
-from attendance_policy import MATCH_THRESHOLD, MATCH_MARGIN
+from attendance_policy import MATCH_THRESHOLD, MATCH_MARGIN, quality_issue
 
 SAMPLES = 5
 MAX_FACES = 20
@@ -96,7 +96,7 @@ class FaceEngine:
                 faces=np.asarray(kept,dtype=np.float32)
         return faces
 
-    def _quality(self, image, face, minimum_fraction=.10):
+    def _quality(self, image, face, minimum_fraction=.10, attendance=False):
         height, width = image.shape[:2]
         x, y, w, h = face[:4]
         crop = image[max(0, int(y)):min(height, int(y+h)), max(0, int(x)):min(width, int(x+w))]
@@ -115,9 +115,12 @@ class FaceEngine:
             return {**details, "status": "adjust", "code": "too_small", "message": "Face detected. Move closer so your face fills more of the frame."}, face
         if crop.size == 0 or sharpness < 6:
             return {**details, "status": "adjust", "code": "blurry", "message": "Face detected, but details are very soft. Hold still and check camera focus."}, face
+        issue = quality_issue(quality) if attendance else None
+        if issue:
+            return {**details, 'status':'adjust', **issue}, face
         return {**details, "status": "ready", "message": "Face detected. Ready to capture."}, face
 
-    def _analyze(self, image):
+    def _analyze(self, image, attendance=False):
         faces = self._detect(image)
         if len(faces) == 0:
             return {"status": "adjust", "code": "no_face", "face_count": 0,
@@ -127,9 +130,9 @@ class FaceEngine:
             boxes = [[float(f[0]/width),float(f[1]/height),float(f[2]/width),float(f[3]/height)] for f in faces]
             return {"status": "adjust", "code": "multiple_faces", "face_count": len(faces), "boxes": boxes,
                     "message": "More than one face detected. Keep one person in the frame for enrollment or selected-person verification."}, None
-        return self._quality(image, faces[0])
+        return self._quality(image, faces[0], attendance=attendance)
 
-    def _group(self, image, extract=False):
+    def _group(self, image, extract=False, attendance=False):
         detected = self._detect(image,max_side=960,far=True)
         if len(detected) > MAX_FACES:
             return {"status": "adjust", "code": "too_many_faces", "face_count": len(detected), "faces": [],
@@ -138,7 +141,7 @@ class FaceEngine:
         for face in detected:
             # Attendance can recognize a small, clear face in a wide scene;
             # enrollment still requires a face that fills enough of the frame.
-            analysis, _ = self._quality(image, face,minimum_fraction=0)
+            analysis, _ = self._quality(image, face,minimum_fraction=0,attendance=attendance)
             if extract and analysis['status'] == 'ready':
                 aligned = self.recognizer.alignCrop(image, face)
                 analysis['embedding'] = normalize(self.recognizer.feature(aligned).copy())
@@ -156,6 +159,10 @@ class FaceEngine:
         with self.lock:
             return self._group(image, extract=True)
 
+    def extract_attendance_group(self, image):
+        with self.lock:
+            return self._group(image, extract=True, attendance=True)
+
     def analyze(self, image):
         with self.lock:
             return self._analyze(image)[0]
@@ -164,9 +171,9 @@ class FaceEngine:
         embedding, analysis = self.extract_with_quality(image)
         return embedding, analysis['box']
 
-    def extract_with_quality(self, image):
+    def extract_with_quality(self, image, attendance=False):
         with self.lock:
-            analysis, face = self._analyze(image)
+            analysis, face = self._analyze(image, attendance=attendance)
             if analysis["status"] != "ready":
                 raise FaceError(analysis["code"], analysis["message"])
             aligned = self.recognizer.alignCrop(image, face)
@@ -325,7 +332,7 @@ class Store:
             except sqlite3.IntegrityError as error:raise FaceError('duplicate_student_id','That student ID is already assigned.') from error
         return next(person for person in self.people() if person['id']==person_id)
 
-    def candidates_batch(self, embeddings):
+    def candidates_batch(self, embeddings, top_two=False):
         """One version-checked snapshot and one matrix multiplication for a frame."""
         if not len(embeddings):
             return []
@@ -346,10 +353,22 @@ class Store:
         if not people:
             return [[] for _ in embeddings]
         scores = np.asarray(embeddings,dtype=np.float64) @ matrix.T
+        if top_two and len(people) > 2:
+            # Score the entire directory, then keep the exact global winner and
+            # runner-up. Two stable argmax passes avoid sorting/materializing
+            # thousands of candidate dictionaries for every camera face.
+            rows = np.arange(len(scores))
+            first = np.argmax(scores, axis=1)
+            first_scores = scores[rows, first].copy()
+            scores[rows, first] = -np.inf
+            second = np.argmax(scores, axis=1)
+            return [[{**people[a], 'similarity':float(first_scores[i])},
+                     {**people[b], 'similarity':float(scores[i,b])}]
+                    for i,(a,b) in enumerate(zip(first,second))]
         return [[{**people[index], 'similarity':float(row[index])} for index in np.argsort(-row,kind='stable')] for row in scores]
 
-    def candidates(self, embedding):
-        return self.candidates_batch([embedding])[0]
+    def candidates(self, embedding, top_two=False):
+        return self.candidates_batch([embedding], top_two=top_two)[0]
 
     def enroll(self, name, vectors, source="laptop", metadata=None, person_id=None):
         # Serialize duplicate checking and insertion across concurrent enrollments.
@@ -392,7 +411,7 @@ class Store:
 
 
 def identify(store, embedding, claimed_id=None):
-    return identify_candidates(store.candidates(embedding), claimed_id)
+    return identify_candidates(store.candidates(embedding, top_two=claimed_id is None), claimed_id)
 
 
 def identify_candidates(candidates, claimed_id=None):

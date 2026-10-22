@@ -5,13 +5,13 @@ import time
 import uuid
 import sqlite3
 import math
+from datetime import datetime, timezone
 from contextlib import closing
 
 from biometrics import FaceError
 from iphone import valid_name
 from attendance_policy import (MATCH_THRESHOLD, MATCH_MARGIN, CONFIRMATIONS,
-    MIN_INTERVAL, MIN_DURATION, MAX_GAP, MAX_FRAME_AGE, MIN_FACE_PIXELS,
-    MIN_SHARPNESS, MIN_DETECTION_SCORE)
+    MIN_INTERVAL, MIN_DURATION, MAX_GAP, MAX_FRAME_AGE, LAST_SEEN_INTERVAL, quality_issue)
 
 
 class Attendance:
@@ -150,7 +150,14 @@ class Attendance:
             return {'status':'checked_out' if state=='checked_out' else 'not_checked_in','newly_present':False,'newly_moved':False,'campus_state':state,
                     'message':'Already checked out.' if state=='checked_out' else 'Check-in is required before check-out.'}
         if action=='check_in' and state=='on_campus':
-            if source!='staff':db.execute("UPDATE attendance_records SET last_seen_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",(row['id'],))
+            if source!='staff':
+                try:
+                    stamp = datetime.fromisoformat(row['last_seen_at'].replace('Z','+00:00'))
+                    age = (datetime.now(timezone.utc) - stamp).total_seconds()
+                except (ValueError, TypeError, AttributeError):
+                    age = LAST_SEEN_INTERVAL
+                if not 0 <= age < LAST_SEEN_INTERVAL:
+                    db.execute("UPDATE attendance_records SET last_seen_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",(row['id'],))
             return {'status':'present','newly_present':False,'newly_moved':False,'campus_state':state,'message':'Already checked in.'}
         db.execute('INSERT INTO attendance_movements(record_id,action,source,note) VALUES(?,?,?,?)',(row['id'],action,source,note))
         stamp=db.execute('SELECT occurred_at FROM attendance_movements WHERE id=last_insert_rowid()').fetchone()[0]
@@ -179,7 +186,16 @@ class Attendance:
     @staticmethod
     def outcome(status, count=0, message='No attendance marked.', **fields):
         return {'status':status, 'confirmations':count, 'required_confirmations':CONFIRMATIONS,
-                'newly_present':False, 'newly_moved':False, 'message':message, **fields}
+                'newly_present':False, 'newly_moved':False, 'message':message,
+                'retry_after_ms':math.ceil(MIN_INTERVAL*1000), **fields}
+
+    @staticmethod
+    def confirmation_delay(evidence, now):
+        delay = MIN_INTERVAL - (now-evidence['time'])
+        if evidence['count'] >= CONFIRMATIONS-1:
+            delay = max(delay, MIN_DURATION - (now-evidence['started']))
+        # One millisecond avoids scheduling exactly on a floating-point boundary.
+        return max(40, math.ceil(delay*1000)+1)
 
     @staticmethod
     def clear_evidence(recognition):
@@ -195,12 +211,7 @@ class Attendance:
             return False
         if candidates > 1 and (not finite(margin) or margin < MATCH_MARGIN):
             return False
-        quality = recognition.get('quality', {})
-        if not isinstance(quality, dict):
-            return False
-        limits = {'face_size_px':MIN_FACE_PIXELS, 'sharpness':MIN_SHARPNESS,
-                  'detection_score':MIN_DETECTION_SCORE}
-        if any(not finite(quality.get(key)) or quality[key] < minimum for key,minimum in limits.items()):
+        if quality_issue(recognition.get('quality')):
             return False
         box = recognition.get('box')
         return (isinstance(box, (list, tuple)) and len(box) == 4 and all(finite(v) for v in box)
@@ -252,7 +263,11 @@ class Attendance:
                               if key[:2] != frame_key or key[2] in present_ids}
             self.sightings = {key:value for key,value in self.sightings.items()
                               if now-value['time'] <= MAX_GAP and (key[:2] != frame_key or key[2] in present_ids)}
-            return [self._observe(db, session_id, scanner_id, item, now, action, axis, direction, frame_id)
+            ids = list(present_ids)
+            roster = {row['person_id']:row for row in db.execute(
+                'SELECT * FROM attendance_records WHERE session_id=? AND person_id IN (' + ','.join('?' for _ in ids) + ')',
+                (session_id, *ids))} if ids else {}
+            return [self._observe(db, session_id, scanner_id, item, now, action, axis, direction, frame_id, roster.get(item['person']['id']))
                     if item['status'] == 'matched' and counts[item['person']['id']] == 1
                     else self.outcome('unrecognized') for item in recognitions]
 
@@ -261,11 +276,10 @@ class Attendance:
         return self.observe_group(session_id, scanner_id, [recognition], action, axis, direction,
                                   frame_id=frame_id, received_at=received_at)[0]
 
-    def _observe(self, db, session_id, scanner_id, recognition, now, action, axis, direction, frame_id):
+    def _observe(self, db, session_id, scanner_id, recognition, now, action, axis, direction, frame_id, row):
         person_id = recognition['person']['id']
         key = (session_id, scanner_id, person_id)
         crossing_key = (*key, axis, direction)
-        row = db.execute('SELECT * FROM attendance_records WHERE session_id=? AND person_id=?', (session_id,person_id)).fetchone()
         if row is None:
             self.sightings.pop(key, None)
             self.crossings.pop(crossing_key, None)
@@ -298,7 +312,8 @@ class Attendance:
                           'checked_out' if action == 'check_out' and row['campus_state'] == 'checked_out' else 'confirming')
                 return self.outcome(status, evidence['count'], campus_state=row['campus_state'],
                                     message='Identity already confirmed. No new movement saved.')
-            return self.outcome('confirming', evidence['count'], message='Waiting for the next fresh confirmation frame.')
+            return self.outcome('confirming', evidence['count'], message='Waiting for the next fresh confirmation frame.',
+                                retry_after_ms=self.confirmation_delay(evidence,now))
         evidence = {**evidence, 'count':min(CONFIRMATIONS, evidence['count']+1), 'time':now,
                     'frames':[*evidence['frames'][-7:], frame_id], 'box':recognition['box'],
                     'min_similarity':min(evidence['min_similarity'],recognition['similarity'])}
@@ -310,7 +325,8 @@ class Attendance:
             self.sightings.pop(next(iter(self.sightings)))
         self.sightings[key] = evidence
         if evidence['count'] < CONFIRMATIONS or now-evidence['started'] < MIN_DURATION:
-            return self.outcome('confirming', evidence['count'], message='Confirming the same identity across fresh, clear camera frames.')
+            return self.outcome('confirming', evidence['count'], message='Confirming the same identity across fresh, clear camera frames.',
+                                retry_after_ms=self.confirmation_delay(evidence,now))
         evidence['confirmed'] = True
         movement = evidence['movement'] if action == 'automatic' else action
         if movement is None:

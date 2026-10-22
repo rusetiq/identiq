@@ -302,6 +302,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.post("/api/recognize")
     def recognize():
+        processing_started = time.perf_counter()
         received_at = attendance.clock()
         data = payload()
         claimed_id = data.get("person_id")
@@ -317,7 +318,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
         try:
             frame = decode_frame(data.get('image'))
             if session_id is not None:
-                vector, analysis = get_engine().extract_with_quality(frame)
+                vector, analysis = get_engine().extract_with_quality(frame, attendance=True)
                 box = analysis['box']
             else:
                 vector, box = get_engine().extract(frame)
@@ -333,10 +334,12 @@ def create_app(database=None, engine=None, allowed_hosts=None):
                 tracking=attendance.observe(session_id,scanner_id,{**recognition,'box':box,'quality':analysis.get('quality',{})},action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive'),
                     frame_id=hashlib.sha256(frame.tobytes()).hexdigest(),received_at=received_at)
             if tracking.get('newly_moved'):shared.attendance_changed()
-        return jsonify(**recognition, box=box, threshold=MATCH_THRESHOLD, attendance=tracking)
+        return jsonify(**recognition, box=box, threshold=MATCH_THRESHOLD, attendance=tracking,
+                       processing_ms=round((time.perf_counter()-processing_started)*1000,1))
 
     @app.post('/api/recognize/group')
     def recognize_group():
+        processing_started = time.perf_counter()
         received_at = attendance.clock()
         data = payload()
         if data.get('person_id') is not None:
@@ -349,8 +352,9 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             with shared.lock:shared.guard(data)
         try:
             frame = decode_frame(data.get('image'))
-            result = get_engine().extract_group(frame)
-            matches = iter(identify_candidates(candidates) for candidates in store.candidates_batch([face['embedding'] for face in result['faces'] if face['status']=='ready']))
+            detector = get_engine()
+            result = detector.extract_attendance_group(frame) if session_id is not None else detector.extract_group(frame)
+            matches = iter(identify_candidates(candidates) for candidates in store.candidates_batch([face['embedding'] for face in result['faces'] if face['status']=='ready'], top_two=True))
             faces = []
             for face in result['faces']:
                 details = {key:value for key,value in face.items() if key != 'embedding'}
@@ -372,7 +376,10 @@ def create_app(database=None, engine=None, allowed_hosts=None):
                 if any(update.get('newly_moved') for update in updates):shared.attendance_changed()
                 for face, update in zip(faces, updates):
                     face['attendance'] = update
-            return jsonify(**{**result, 'faces':faces}, threshold=MATCH_THRESHOLD)
+            retry_after = min((update['retry_after_ms'] for update in updates if update['status'] in
+                               ('confirming','tracking','present','checked_out')), default=500 if faces else 600) if session_id is not None else 650
+            return jsonify(**{**result, 'faces':faces}, threshold=MATCH_THRESHOLD, retry_after_ms=retry_after,
+                           processing_ms=round((time.perf_counter()-processing_started)*1000,1))
         except FaceError:
             if session_id is not None:
                 attendance.reset(session_id, scanner_id)

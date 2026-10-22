@@ -257,11 +257,17 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
     try {
       const selected = $("person-select").value;
       const capturedAt=performance.now(),image=frame();
+      const requestStarted=performance.now();
       const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {...sharedContext,attendance_session_id: attendanceSessionId, scanner_id: scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value} : {}) }, scanAbort.signal);
       if (!state.scanning || generation !== state.generation) break;
+      window.IdentiqScan?.record(data,performance.now()-requestStarted);
       state.matchThreshold=data.threshold;
       failures=0;
-      if(group) {liveTracker.accept(data,image,capturedAt);await showGroupResults(data,groupStreaks,attendanceSessionId);continue;}
+      if(group) {
+        liveTracker.accept(data,image,capturedAt);await showGroupResults(data,groupStreaks,attendanceSessionId);
+        await sleep(window.IdentiqScan?.delay(data,!!attendanceSessionId) ?? (attendanceSessionId ? (data.face_count ? 250 : 600) : 650));
+        continue;
+      }
       if (data.status === "matched") {
         state.streak = state.candidate === data.person.id ? state.streak + 1 : 1;
         state.candidate = data.person.id;
@@ -291,7 +297,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       state.streak = 0;state.candidate = null;clearBox();
       groupStreaks.clear();showCameraNames([]);$("scan-face-results").replaceChildren();$("scan-face-results").hidden=true;
       result("Adjust your camera view",error.message,"warning");
-      if (!["no_face","multiple_faces","blurry","too_small"].includes(error.code)) { stopScan();toast(error.message);break; }
+      if (!["no_face","multiple_faces","blurry","too_small","uncertain_detection","quality"].includes(error.code)) { stopScan();toast(error.message);break; }
     }
     await sleep(attendanceSessionId ? 40 : 650);
   }
@@ -325,8 +331,6 @@ async function showGroupResults(data,streaks,sessionId) {
   const visible=holder.children.length;
   result(visible?`${confirmed} ${sessionId?'movement records':'recognized'}`:'Ready for the next person',visible?`${confirming} confirming · ${visible-confirmed-confirming} need review`:state.movementMode==='automatic' ? 'Waiting for an enrolled person to cross the line.' : 'Waiting for an enrolled person.',confirmed?'matched':'');
   if(newlyPresent.length) {toast(newlyPresent.join(', '));refreshAttendance(sessionId).catch(error=>{if(!transientError(error))toast(error.message);});}
-  // Requests remain sequential; attendance resumes shortly after each response.
-  await sleep(sessionId ? (data.face_count ? 80 : 600) : 650);
 }
 
 async function enroll(event) {

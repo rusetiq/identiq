@@ -37,9 +37,12 @@ class FakeEngine:
             raise self.error
         return self.vector.copy(), [0.1, 0.1, 0.5, 0.5]
 
-    def extract_with_quality(self, frame):
+    def extract_with_quality(self, frame, attendance=False):
         embedding, box = self.extract(frame)
         return embedding, {**self.analyze(frame), 'box':box}
+
+    def extract_attendance_group(self, frame):
+        return self.extract_group(frame)
 
 
 _frames = itertools.count(1)

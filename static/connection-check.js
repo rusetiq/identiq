@@ -15,6 +15,13 @@
       const server=await window.IdentiqNetwork.request('/connection-check?format=json',{timeoutMs:6000});
       if(!server.running_build || !server.installed_build)throw Object.assign(new Error('Older server'),{code:'old_server'});
       row('Server version',server.running_build);row('Installed version',server.installed_build);row('Server response',`${Math.round(performance.now()-started)} ms`);
+      const scan=window.IdentiqScan?.last();
+      if(scan){
+        row('Last camera scan',new Date(scan.recorded_at).toLocaleTimeString());
+        if(scan.request_ms!==null)row('Scan request round trip',`${scan.request_ms} ms`);
+        if(scan.processing_ms!==null)row('Scan server processing',`${scan.processing_ms} ms`);
+        row('Faces in last scan',scan.face_count);
+      }
       const source=document.getElementById('shared-status');if(source)row('Shared camera',source.textContent);
       if(server.needs_restart){
         element('connection-check-summary').textContent='Updated files are installed, but the server is still running older code.';

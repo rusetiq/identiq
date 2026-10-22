@@ -2,9 +2,10 @@ from contextlib import contextmanager
 import uuid
 import numpy as np
 import pytest
-from biometrics import Store
+from biometrics import Store, identify
 from attendance import Attendance
 from test_app import setup, vector, image, enroll
+from test_attendance import clock, recognize, start
 
 
 def test_batch_matches_average_sample_scores_and_reuses_snapshot(tmp_path):
@@ -19,6 +20,20 @@ def test_batch_matches_average_sample_scores_and_reuses_snapshot(tmp_path):
     assert store.candidates_batch(queries)==batch
     assert store._identity_cache is snapshot
     assert store.candidates_batch([])==[]
+
+
+@pytest.mark.parametrize('size',[0,1,2,8])
+def test_top_two_match_full_ranking_including_ties_and_unknowns(tmp_path,size):
+    store=Store(tmp_path/'private'/'test.sqlite3')
+    people=[store.enroll(str(i),[vector(i)]*5) for i in range(size)]
+    queries=[vector(),vector(0,1),vector(3),vector(20)]
+    full=store.candidates_batch(queries)
+    assert store.candidates_batch(queries,top_two=True)==[row[:2] for row in full]
+    if size>=3:
+        # A real claim outside the top two must be a mismatch, not a missing enrollment.
+        assert identify(store,vector(),claimed_id=people[-1]['id'])['status']=='mismatch'
+        with store.connect() as db:db.execute('UPDATE people SET name=? WHERE id=?',('Updated',people[0]['id']))
+        assert store.candidates_batch([vector()],top_two=True)[0][0]['name']=='Updated'
 
 
 def test_identity_cache_refreshes_across_connections(tmp_path):
@@ -38,17 +53,20 @@ def test_group_attendance_uses_one_connection_and_retains_confirmed_status(tmp_p
     people=[store.enroll(str(i),[vector(i)]*5) for i in range(8)]
     attendance=Attendance(store);sid=attendance.start('Group')['id'];scanner=str(uuid.uuid4());now=[100.0]
     attendance.clock=lambda:now[0]
-    connections=[];original=store.connect
+    connections=[];statements=[];original=store.connect
     @contextmanager
     def tracked():
         connections.append(1)
-        with original() as db:yield db
+        with original() as db:
+            db.set_trace_callback(statements.append)
+            yield db
     store.connect=tracked
     matches=[{'status':'matched','person':person,'similarity':1.,'match_margin':1.,'candidate_count':8,
               'box':[.1,.1,.3,.3],'quality':{'face_size_px':120,'sharpness':20,'detection_score':.99}} for person in people]
     for count in (1,2,3):
-        connections.clear();result=attendance.observe_group(sid,scanner,matches,frame_id=str(count).zfill(64))
+        connections.clear();statements.clear();result=attendance.observe_group(sid,scanner,matches,frame_id=str(count).zfill(64))
         assert len(connections)==1
+        assert len([sql for sql in statements if sql.startswith('SELECT') and 'attendance_records' in sql])==1
         assert all(r['confirmations']==count for r in result)
         assert all(r['status']==('present' if count==3 else 'confirming') and r['newly_present']==(count==3) for r in result)
         now[0]+=.7
@@ -72,3 +90,30 @@ def test_overview_default_history_and_auth(setup,image):
     for invalid in ['0','-1','abc','9'*5000]:
         assert client.get('/api/attendance/overview',query_string={'session_id':invalid}).status_code==422
     assert client.application.test_client().get('/api/attendance/overview').status_code==401
+
+
+def test_repeated_confirmed_sightings_do_not_rewrite_the_database(setup,image):
+    client,headers,_,_=setup
+    enroll(client,headers,image)
+    sid=start(client,headers).json['session']['id'];moment=clock(client);scanner=str(uuid.uuid4())
+    attendance=client.application.extensions['attendance']
+    for _ in range(3):recognize(client,headers,image,sid,scanner);moment[0]+=.7
+    statements=[];original=attendance.store.connect
+    @contextmanager
+    def tracked():
+        with original() as db:
+            db.set_trace_callback(statements.append)
+            yield db
+    attendance.store.connect=tracked
+    for _ in range(5):
+        assert recognize(client,headers,image,sid,scanner).json['attendance']['status']=='present'
+        moment[0]+=.7
+    assert not any(sql.startswith('UPDATE attendance_records') for sql in statements)
+    assert len(attendance.detail(sid)['movements'])==1
+    # Last-seen still refreshes after the reporting interval, without another arrival.
+    with original() as db:
+        db.execute("UPDATE attendance_records SET last_seen_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 seconds') WHERE session_id=?",(sid,))
+    statements.clear()
+    assert recognize(client,headers,image,sid,scanner).json['attendance']['status']=='present'
+    assert len([sql for sql in statements if sql.startswith('UPDATE attendance_records')])==1
+    assert len(attendance.detail(sid)['movements'])==1

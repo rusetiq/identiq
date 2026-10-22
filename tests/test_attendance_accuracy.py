@@ -172,3 +172,24 @@ def test_match_without_server_evidence_cannot_bypass_confirmation(setup, image):
     result=attendance.observe(sid, scanner, {'status':'matched','person':person}, frame_id='a'*64)
     assert result['status']=='insufficient_evidence'
     no_attendance(client, sid)
+
+
+@pytest.mark.parametrize('group',[False,True])
+def test_server_pacing_reaches_confirmation_with_three_fresh_frames(setup,image,group):
+    client,headers,engine,sid,moment,scanner=prepare(setup,image)
+    engine.extract_group=lambda frame:response_faces([engine.vector])
+    started=moment[0]
+    for count in (1,2,3):
+        result=(scan_group if group else recognize)(client,headers,image,sid,scanner).json
+        face=result['faces'][0] if group else result
+        update=face['attendance']
+        assert update['confirmations']==count
+        assert result['processing_ms']>=0
+        if count<3:
+            assert update['status']=='confirming'
+            no_attendance(client,sid)
+            delay=result['retry_after_ms'] if group else update['retry_after_ms']
+            assert 250<=delay<=351
+            moment[0]+=delay/1000
+    assert moment[0]-started>=.6
+    assert update['status']=='present' and update['newly_moved']
