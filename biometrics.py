@@ -381,13 +381,14 @@ class Store:
                     grouped.setdefault(row['id'], {'name':row['name'],'vectors':[]})['vectors'].append(np.frombuffer(row['vector'],dtype=np.float32))
                 people = [{'id':person_id,'name':person['name']} for person_id,person in grouped.items()]
                 # Unnormalized means preserve the existing average sample similarity.
-                matrix = np.asarray([np.mean(person['vectors'],axis=0,dtype=np.float64) for person in grouped.values()],dtype=np.float64).reshape((-1,EMBEDDING_DIMENSION))
+                # Use float32 matrix operations to leverage SIMD vectorization and cut cache memory in half.
+                matrix = np.asarray([np.mean(person['vectors'],axis=0,dtype=np.float32) for person in grouped.values()],dtype=np.float32).reshape((-1,EMBEDDING_DIMENSION))
                 matrix.setflags(write=False)
                 self._identity_cache = (revision, people, matrix)
             _, people, matrix = self._identity_cache
         if not people:
             return [[] for _ in embeddings]
-        scores = np.asarray(embeddings,dtype=np.float64) @ matrix.T
+        scores = np.asarray(embeddings,dtype=np.float32) @ matrix.T
         if top_two and len(people) > 2:
             # Score the entire directory, then keep the exact global winner and
             # runner-up. Two stable argmax passes avoid sorting/materializing
