@@ -140,7 +140,9 @@ class FaceEngine:
         # larger, smoother webcam frames even when facial features were usable.
         sharpness, brightness = 0.0, 0.0
         if crop.size:
-            gray = cv2.cvtColor(cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+            # Convert 3-channel BGR crop to 1-channel grayscale first before downsampling to 128x128.
+            # Downsampling a 1-channel array reduces interpolation math and memory bandwidth by ~66% compared to 3-channel BGR.
+            gray = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (128, 128), interpolation=cv2.INTER_AREA)
             sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
             brightness = float(gray.mean())
         quality = {"face_size_px": round(float(min(w, h))), "sharpness": round(sharpness, 1),
