@@ -20,12 +20,49 @@ function toast(message) {
 }
 
 const connectionIssues=new Set();
+let offlineQueueCount=0,offlineSyncing=false,lastOfflineCaptureAt=0;
+function renderConnectionStatus(){
+  const banner=$('connection-status');banner.hidden=!connectionIssues.size&&!offlineQueueCount;
+  if(offlineQueueCount){
+    banner.textContent=`${navigator.onLine===false?'Network offline.':'Connection restored.'} ${offlineQueueCount} recent attendance frame${offlineQueueCount===1?' is':'s are'} saved on this tablet and will verify when scanning is paused.`;
+  }else banner.textContent=navigator.onLine===false?'Network offline. Scanning will resume when the connection returns.':'Connection interrupted. Reconnecting automatically…';
+}
 function connectionStatus(channel,failed){
   if(failed)connectionIssues.add(channel);else connectionIssues.delete(channel);
-  const banner=$('connection-status');banner.hidden=!connectionIssues.size;
-  banner.textContent=navigator.onLine===false?'Network offline. Scanning will resume when the connection returns.':'Connection interrupted. Reconnecting automatically…';
+  renderConnectionStatus();
 }
 const transientError=error=>window.IdentiqNetwork.transient(error);
+async function refreshOfflineQueue(){
+  try{offlineQueueCount=await window.IdentiqOfflineAttendance.count();renderConnectionStatus();}catch(error){}
+}
+async function saveOfflineAttendance(payload){
+  if(!window.IdentiqOfflineAttendance || Date.now()-lastOfflineCaptureAt<1000)return false;
+  lastOfflineCaptureAt=Date.now();
+  try{
+    offlineQueueCount=await window.IdentiqOfflineAttendance.add(payload);renderConnectionStatus();
+    return true;
+  }catch(error){return false;}
+}
+async function syncOfflineAttendance(){
+  if(offlineSyncing || state.scanning || navigator.onLine===false || !window.IdentiqOfflineAttendance)return;
+  offlineSyncing=true;let synced=0;
+  try{
+    for(const item of await window.IdentiqOfflineAttendance.entries()){
+      try{
+        await api('/api/recognize/group','POST',item.payload);
+        await window.IdentiqOfflineAttendance.remove([item.id]);synced++;
+      }catch(error){
+        if(transientError(error))break;
+        // A finished session or expired sign-in must not leave biometric frames
+        // on the tablet indefinitely.
+        await window.IdentiqOfflineAttendance.remove([item.id]);
+      }
+    }
+  }finally{
+    offlineSyncing=false;await refreshOfflineQueue();
+    if(synced){await refreshAttendance().catch(()=>{});toast(`${synced} offline attendance capture${synced===1?'':'s'} verified.`);}
+  }
+}
 let refreshingToken=null,signingOut=false;
 async function refreshClientToken(){
   if(!refreshingToken)refreshingToken=api('/api/client-context').then(context=>{token=context.token;return token;}).finally(()=>refreshingToken=null);
@@ -160,6 +197,7 @@ function stopScan() {
   clearBox();updateControls();
   $("scan-face-results").replaceChildren();$("scan-face-results").hidden=true;
   window.sharedRoom?.localStopped();
+  setTimeout(()=>syncOfflineAttendance(),0);
 }
 
 function stopCamera() {
@@ -250,6 +288,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
   const groupStreaks = new Map();
   const generation = ++state.generation;
   let failures=0;
+  const attendancePayload=image=>({image,person_id:null,...sharedContext,attendance_session_id:attendanceSessionId,scanner_id:scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value});
   // Keep only the newest frame while inference is running. A deeper queue
   // makes a slow tablet process old camera images and feel increasingly late.
   // Frames are never written to disk and are discarded when scanning stops.
@@ -262,6 +301,10 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
     } catch(error) {}
   };
   const queueTimer=attendanceSessionId?setInterval(queueFrame,300):null;
+  const offlineTimer=attendanceSessionId&&!sharedExecution?setInterval(()=>{
+    if(!connectionIssues.has('api'))return;
+    try{saveOfflineAttendance(attendancePayload(frame(captureCanvas,800,.72)));}catch(error){}
+  },1000):null;
   if(attendanceSessionId)queueFrame();
   $("recognize").textContent = "Pause recognition";
   if (attendanceSessionId) $("attendance-scan").textContent = "Pause attendance scan";
@@ -269,13 +312,15 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
   updateControls();
   try {
     while (state.scanning && generation === state.generation && state.stream) {
+      let recognitionPayload=null;
       try {
       const selected = $("person-select").value;
       if(attendanceSessionId && !frameQueue.length)queueFrame();
       const queued=attendanceSessionId?frameQueue.shift():null;
       const capturedAt=queued?.capturedAt ?? performance.now(),image=queued?.image ?? frame(captureCanvas,attendanceSessionId ? 800 : 800,.72);
       const requestStarted=performance.now();
-      const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", { image, person_id: !attendanceSessionId && selected ? Number(selected) : null, ...(attendanceSessionId ? {...sharedContext,attendance_session_id: attendanceSessionId, scanner_id: scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value} : {}) }, scanAbort.signal);
+      recognitionPayload=attendanceSessionId?attendancePayload(image):{image,person_id:selected ? Number(selected) : null};
+      const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", recognitionPayload, scanAbort.signal);
       if (!state.scanning || generation !== state.generation) break;
       window.IdentiqScan?.record(data,performance.now()-requestStarted);
       state.matchThreshold=data.threshold;
@@ -309,6 +354,10 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       } catch (error) {
       if (!state.scanning || generation !== state.generation) break;
       if(transientError(error)){
+        if(attendanceSessionId && recognitionPayload && !sharedExecution){
+          const saved=await saveOfflineAttendance(recognitionPayload);
+          if(saved)result('Offline capture saved','It will be verified by the attendance laptop after the connection returns.');
+        }
         clearBox();groupStreaks.clear();result('Reconnecting…','Scan remains enabled. Waiting for the server.');
         await sleep(Math.min(15000,500*2**Math.min(++failures,5)));continue;
       }
@@ -322,6 +371,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
     }
   } finally {
     if(queueTimer)clearInterval(queueTimer);
+    if(offlineTimer)clearInterval(offlineTimer);
     frameQueue.length=0;
   }
 }
@@ -502,6 +552,7 @@ async function maintainCameraAwake(){
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)maintainCameraAwake();});
 async function initializeApp(){
   $("camera-dot").classList.add("off");
+  await refreshOfflineQueue();
   try {
     const status=await api("/api/status");state.ready=status.models_ready;
     await refreshPeople();
@@ -517,6 +568,8 @@ async function initializeApp(){
   updateControls();
 }
 initializeApp();
+window.addEventListener('online',()=>{renderConnectionStatus();setTimeout(()=>syncOfflineAttendance(),500);});
+window.addEventListener('offline',renderConnectionStatus);
 
 function setSource(source) {
   if (state.enrolling) return;
