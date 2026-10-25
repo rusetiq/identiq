@@ -7,7 +7,7 @@ let toastTimer;
 const captureCanvas=document.createElement('canvas');
 const trackingCanvas=document.createElement('canvas');
 const liveTracker = new FaceTracker({video: $("video"), canvas: $("overlay"), capture: () => frame(trackingCanvas,640,state.mode==='enroll' ? .82 : .62),
-  request: image => api("/api/analyze", "POST", {image,group:state.mode==='attendance' || state.mode==='verify' && !$("person-select").value}), onUpdate: updateControls, guide:()=>state.mode==="attendance" && state.activeAttendance && state.movementMode==="automatic" ? {axis:$("crossing-axis").value,direction:$("entry-direction").value} : null, pause:()=>document.hidden || state.savingEnrollment || state.scanning && (state.scanSessionId || !$("person-select").value)});
+  request: image => apiFrame("/api/analyze", {image,group:state.mode==='attendance' || state.mode==='verify' && !$("person-select").value}), onUpdate: updateControls, guide:()=>state.mode==="attendance" && state.activeAttendance && state.movementMode==="automatic" ? {axis:$("crossing-axis").value,direction:$("entry-direction").value} : null, pause:()=>document.hidden || state.savingEnrollment || state.scanning && (state.scanSessionId || !$("person-select").value)});
 let cancelEnrollment = false;
 const recentCheckIns=new Map();
 const enrollmentFilters=new window.EnrollmentFilters({onChange:()=>selectEnrollment()});
@@ -49,7 +49,7 @@ async function syncOfflineAttendance(){
   try{
     for(const item of await window.IdentiqOfflineAttendance.entries()){
       try{
-        await api('/api/recognize/group','POST',item.payload);
+        await apiFrame('/api/recognize/group',item.payload);
         await window.IdentiqOfflineAttendance.remove([item.id]);synced++;
       }catch(error){
         if(transientError(error))break;
@@ -71,16 +71,24 @@ async function refreshClientToken(){
 function expiredSession(){
   if(signingOut)return;signingOut=true;window.sharedRoom?.shutdown();stopCamera();window.location.assign('/?expired=1');
 }
-async function api(path, method = "GET", data, signal, refreshed=false) {
+function compactFrameForm(data){
+  const {image,...metadata}=data;
+  const encoded=image.slice(image.indexOf(',')+1),raw=atob(encoded),bytes=new Uint8Array(raw.length);
+  for(let index=0;index<raw.length;index++)bytes[index]=raw.charCodeAt(index);
+  const form=new FormData();form.append('payload',JSON.stringify(metadata));form.append('image',new Blob([bytes],{type:'image/jpeg'}),'frame.jpg');
+  return form;
+}
+function apiFrame(path,data,signal){return api(path,'POST',data,signal,false,true);}
+async function api(path, method = "GET", data, signal, refreshed=false, frameUpload=false) {
   try{
-    const body=await window.IdentiqNetwork.request(path,{method,body:data,signal,headers:{"X-Local-Token":token},timeoutMs:path.startsWith("/api/enroll")?60000:10000});
+    const body=await window.IdentiqNetwork.request(path,{method,body:frameUpload?compactFrameForm(data):data,formData:frameUpload,signal,headers:{"X-Local-Token":token},timeoutMs:path.startsWith("/api/enroll")?60000:10000});
     connectionStatus('api',false);return body;
   }catch(error){
     if(error.status===401){expiredSession();throw error;}
     if(error.status===403 && error.code==='invalid_token' && !refreshed){
       await refreshClientToken();
       if(signal?.aborted)throw Object.assign(new Error('Scan cancelled.'),{code:'cancelled'});
-      return api(path,method,data,signal,true);
+      return api(path,method,data,signal,true,frameUpload);
     }
     if(transientError(error))connectionStatus('api',true);
     throw error;
@@ -320,7 +328,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       const capturedAt=queued?.capturedAt ?? performance.now(),image=queued?.image ?? frame(captureCanvas,attendanceSessionId ? 800 : 800,.72);
       const requestStarted=performance.now();
       recognitionPayload=attendanceSessionId?attendancePayload(image):{image,person_id:selected ? Number(selected) : null};
-      const data = await api(group ? "/api/recognize/group" : "/api/recognize", "POST", recognitionPayload, scanAbort.signal);
+      const data = await apiFrame(group ? "/api/recognize/group" : "/api/recognize", recognitionPayload, scanAbort.signal);
       if (!state.scanning || generation !== state.generation) break;
       window.IdentiqScan?.record(data,performance.now()-requestStarted);
       state.matchThreshold=data.threshold;

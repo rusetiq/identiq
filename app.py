@@ -243,6 +243,24 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             raise FaceError("invalid_request", "Send a JSON object.")
         return data
 
+    def frame_payload():
+        """Accept compact multipart camera frames while retaining JSON clients."""
+        if request.mimetype == 'multipart/form-data':
+            try:
+                data=json.loads(request.form.get('payload','{}'))
+            except json.JSONDecodeError as error:
+                raise FaceError('invalid_request','Send valid frame metadata.') from error
+            image=request.files.get('image')
+            if not isinstance(data,dict) or image is None:
+                raise FaceError('invalid_request','Send frame metadata and a JPEG image.')
+            data['image']=image.read()
+            return data
+        return payload()
+
+    def frame_fingerprint(value, frame):
+        raw=value.encode() if isinstance(value,str) else bytes(value) if isinstance(value,(bytes,bytearray)) else frame.tobytes()
+        return hashlib.sha256(raw).hexdigest()
+
     @app.get('/parents')
     def parent_page():
         return render_template('parents.html')
@@ -351,7 +369,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.post("/api/analyze")
     def analyze():
-        data = payload()
+        data = frame_payload()
         if 'group' in data and type(data['group']) is not bool:
             raise FaceError('invalid_request', 'Group mode must be true or false.')
         frame = decode_frame(data.get('image'))
@@ -388,7 +406,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     def recognize():
         processing_started = time.perf_counter()
         received_at = attendance.clock()
-        data = payload()
+        data = frame_payload()
         claimed_id = data.get("person_id")
         if claimed_id is not None and (type(claimed_id) is not int or claimed_id < 1):
             raise FaceError("invalid_person", "Choose a valid enrolled person.")
@@ -414,14 +432,10 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             raise
         tracking=None
         if session_id is not None:
-            # Optimize frame_id hash: hash the incoming payload string directly
-            # to avoid allocating ~1-3MB raw BGR pixel arrays and hashing millions of bytes.
-            raw_image = data.get('image')
-            frame_id = hashlib.sha256(raw_image.encode() if isinstance(raw_image, str) and raw_image else frame.tobytes()).hexdigest()
             with store.lock,shared.lock:
                 shared.guard(data)
                 tracking=attendance.observe(session_id,scanner_id,{**recognition,'box':box,'quality':analysis.get('quality',{})},action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive'),
-                    frame_id=frame_id,received_at=received_at)
+                    frame_id=frame_fingerprint(data.get('image'),frame),received_at=received_at)
             if tracking.get('newly_moved'):shared.attendance_changed()
         return jsonify(**recognition, box=box, threshold=MATCH_THRESHOLD, attendance=tracking,
                        processing_ms=round((time.perf_counter()-processing_started)*1000,1))
@@ -430,7 +444,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     def recognize_group():
         processing_started = time.perf_counter()
         received_at = attendance.clock()
-        data = payload()
+        data = frame_payload()
         if data.get('person_id') is not None:
             raise FaceError('invalid_person', 'Selected-person verification requires one face. Use the single-face scanner.')
         session_id = data.get('attendance_session_id')
@@ -461,14 +475,10 @@ def create_app(database=None, engine=None, allowed_hosts=None):
                     face['status'] = 'ambiguous'
                     face['message'] = 'Multiple faces match the same enrollment. No attendance marked for those faces.'
             if session_id is not None:
-                # Optimize frame_id hash: hash the incoming payload string directly
-                # to avoid allocating ~1-3MB raw BGR pixel arrays and hashing millions of bytes.
-                raw_image = data.get('image')
-                frame_id = hashlib.sha256(raw_image.encode() if isinstance(raw_image, str) and raw_image else frame.tobytes()).hexdigest()
                 with store.lock,shared.lock:
                     shared.guard(data)
                     updates = attendance.observe_group(session_id, scanner_id, faces, data.get('attendance_action','check_in'),data.get('crossing_axis','x'),data.get('entry_direction','positive'),
-                        frame_id=frame_id,received_at=received_at)
+                        frame_id=frame_fingerprint(data.get('image'),frame),received_at=received_at)
                 if any(update.get('newly_moved') for update in updates):shared.attendance_changed()
                 for face, update in zip(faces, updates):
                     face['attendance'] = update

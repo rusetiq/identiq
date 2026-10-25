@@ -43,12 +43,20 @@ def normalize(vector):
 
 
 def decode_frame(value):
-    if not isinstance(value, str) or not value.startswith("data:image/jpeg;base64,"):
+    if isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+    elif isinstance(value, str) and value.startswith("data:image/jpeg;base64,"):
+        if len(value) > 2_000_000:
+            raise FaceError("invalid_image", "Camera frame is too large.")
+        try:
+            raw = base64.b64decode(value.split(",", 1)[1], validate=True)
+        except binascii.Error as error:
+            raise FaceError("invalid_image", "Camera frame could not be decoded.") from error
+    else:
         raise FaceError("invalid_image", "Send a JPEG camera frame.")
-    if len(value) > 2_000_000:
+    if not raw or len(raw) > 2_000_000:
         raise FaceError("invalid_image", "Camera frame is too large.")
     try:
-        raw = base64.b64decode(value.split(",", 1)[1], validate=True)
         # Read JPEG dimensions before decoding to bound decompression memory.
         with Image.open(io.BytesIO(raw)) as header:
             if header.format != "JPEG" or min(header.size) < 80 or max(header.size) > 1920:

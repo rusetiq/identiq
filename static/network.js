@@ -4,12 +4,12 @@ window.IdentiqNetwork=(()=>{
   const endpoint=path=>path.split('?')[0].replace(/\/\d+(?=\/|$)/g,'/:id');
   const transient=error=>['network_unavailable','server_timeout','server_unavailable','invalid_response'].includes(error?.code);
   function failure(message,code,status){return Object.assign(new Error(message),{code,status});}
-  async function request(path,{method='GET',body,headers={},signal,timeoutMs=10000}={}){
+  async function request(path,{method='GET',body,formData=false,headers={},signal,timeoutMs=10000}={}){
     const controller=new AbortController(),cancel=()=>controller.abort();
     if(signal?.aborted)controller.abort();else signal?.addEventListener('abort',cancel,{once:true});
     const timer=setTimeout(cancel,timeoutMs);
     try{
-      const response=await fetch(path,{method,signal:controller.signal,cache:'no-store',headers:{...(body!==undefined?{'Content-Type':'application/json'}:{}),...headers},...(body!==undefined?{body:JSON.stringify(body)}:{})});
+      const response=await fetch(path,{method,signal:controller.signal,cache:'no-store',headers:{...(body!==undefined&&!formData?{'Content-Type':'application/json'}:{}),...headers},...(body!==undefined?{body:formData?body:JSON.stringify(body)}:{})});
       if([408,500,502,503,504].includes(response.status))throw failure('The attendance server is temporarily unavailable. Reconnecting…','server_unavailable',response.status);
       let data;
       try{data=await response.json();}catch(error){
