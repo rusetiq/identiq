@@ -145,9 +145,9 @@ class FaceEngine:
         crop = image[max(0, int(y)):min(height, int(y+h)), max(0, int(x)):min(width, int(x+w))]
         if crop.size == 0:
             return {**details, "status": "adjust", "code": "blurry", "message": "Face detected, but details are very soft. Hold still and check camera focus."}, face
-        # Convert crop to grayscale before resizing to 128x128. Grayscale resize interpolates
-        # 1 channel instead of 3 BGR channels, cutting interpolation cost by ~45%.
-        gray = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (128, 128), interpolation=cv2.INTER_AREA)
+        # Keep resize before grayscale conversion: uint8 rounding changes sharpness
+        # near the recognition and attendance cutoffs if these operations are swapped.
+        gray = cv2.cvtColor(cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
         sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         brightness = float(gray.mean())
         quality["sharpness"] = round(sharpness, 1)
