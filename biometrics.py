@@ -134,21 +134,25 @@ class FaceEngine:
     def _quality(self, image, face, minimum_fraction=.10, attendance=False):
         height, width = image.shape[:2]
         x, y, w, h = face[:4]
-        crop = image[max(0, int(y)):min(height, int(y+h)), max(0, int(x)):min(width, int(x+w))]
         anchors = [[float(face[i] / width), float(face[i+1] / height)] for i in range(4, 14, 2)]
-        # Evaluate every face at the same resolution. Raw-pixel variance penalized
-        # larger, smoother webcam frames even when facial features were usable.
-        sharpness, brightness = 0.0, 0.0
-        if crop.size:
-            gray = cv2.cvtColor(cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
-            sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-            brightness = float(gray.mean())
-        quality = {"face_size_px": round(float(min(w, h))), "sharpness": round(sharpness, 1),
-                   "brightness": round(brightness, 1), "detection_score": round(float(face[14]), 3)}
+        quality = {"face_size_px": round(float(min(w, h))), "sharpness": 0.0,
+                   "brightness": 0.0, "detection_score": round(float(face[14]), 3)}
         details = {"face_count": 1, "box": [float(x / width), float(y / height), float(w / width), float(h / height)], "landmarks": anchors, "quality": quality}
+        # Fail fast for faces that are too small before performing crop extraction,
+        # color conversion, image resizing, and Laplacian calculations.
         if min(w, h) < 64 or min(w / width, h / height) < minimum_fraction:
             return {**details, "status": "adjust", "code": "too_small", "message": "Face detected. Move closer so your face fills more of the frame."}, face
-        if crop.size == 0 or sharpness < 6:
+        crop = image[max(0, int(y)):min(height, int(y+h)), max(0, int(x)):min(width, int(x+w))]
+        if crop.size == 0:
+            return {**details, "status": "adjust", "code": "blurry", "message": "Face detected, but details are very soft. Hold still and check camera focus."}, face
+        # Keep resize before grayscale conversion: uint8 rounding changes sharpness
+        # near the recognition and attendance cutoffs if these operations are swapped.
+        gray = cv2.cvtColor(cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        brightness = float(gray.mean())
+        quality["sharpness"] = round(sharpness, 1)
+        quality["brightness"] = round(brightness, 1)
+        if sharpness < 6:
             return {**details, "status": "adjust", "code": "blurry", "message": "Face detected, but details are very soft. Hold still and check camera focus."}, face
         issue = quality_issue(quality) if attendance else None
         if issue:
