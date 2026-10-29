@@ -8,6 +8,31 @@ from test_app import setup, vector, image, enroll
 from test_attendance import clock, recognize, start
 
 
+def test_single_profile_lookup_matches_directory_and_profile_writes(tmp_path):
+    store=Store(tmp_path/'private'/'test.sqlite3')
+    first=store.enroll('A',[vector()]*5)
+    second=store.enroll('B',[vector(2)]*5)
+    with store.connect() as db:
+        db.executemany('INSERT INTO embeddings(person_id,vector,source) VALUES(?,?,?)',[
+            (first['id'],vector().tobytes(),'iphone_truedepth'),
+            (first['id'],bytes(128*4),'laptop'),
+        ])
+    directory={person['id']:person for person in store.people()}
+    assert store.person(first['id'])==directory[first['id']]
+    assert store.person(second['id'])==directory[second['id']]
+    assert store.person(first['id'])['samples']==7
+    assert store.person(first['id'])['compatible_samples']==6
+    assert store.person(first['id'])['iphone_samples']==1
+    assert store.person(99999) is None
+    def unexpected_directory_scan():
+        pytest.fail('Single profile updates must not fetch the full directory')
+    store.people=unexpected_directory_scan
+    updated=store.update_student_profile(first['id'],'ST-001','7A')
+    assert updated['student_id']=='ST-001' and updated['compatible_samples']==6
+    staff=store.save_profile({'name':'New Staff','person_type':'staff','employee_code':'EMP-01'})
+    assert staff['name']=='New Staff' and staff['samples']==staff['compatible_samples']==0
+
+
 def test_batch_matches_average_sample_scores_and_reuses_snapshot(tmp_path):
     store=Store(tmp_path/'private'/'test.sqlite3')
     a=store.enroll('A',[vector(),vector(0,1),vector()])
