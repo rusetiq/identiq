@@ -9,3 +9,7 @@
 ## 2026-10-27 - Use Indexed Single-Record Query for Profile Reads
 **Learning:** Returning updated records via `next(p for p in self.people() if p['id']==person_id)` executed a full database query joining all people and all embedding vector blobs, building $N$ Python dictionaries to find 1 record (~34.2 ms with 1,000 enrolled students). Querying `WHERE p.id=?` directly reduces latency by ~97% (~1.0 ms).
 **Action:** Always fetch specific identity records using `WHERE p.id=?` instead of calling directory-wide `people()` queries and filtering in Python memory.
+
+## 2026-10-30 - Direct Indexed Active Session Query for Camera Change Signals
+**Learning:** `SharedCamera.attendance_changed()` and `command()` called `Attendance.sessions()`, executing a complex SQLite `LEFT JOIN` on `attendance_records` grouped across all historical sessions to find the active session ID (~2.1 ms). Replacing it with `SELECT id FROM attendance_sessions WHERE status='active'` takes ~0.7 ms, avoiding unnecessary joins and full-roster aggregations on every camera update.
+**Action:** Use targeted indexed status queries (`WHERE status='active'`) instead of full directory or session listing methods when checking session state.

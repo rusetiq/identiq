@@ -142,3 +142,28 @@ def test_repeated_confirmed_sightings_do_not_rewrite_the_database(setup,image):
     assert recognize(client,headers,image,sid,scanner).json['attendance']['status']=='present'
     assert len([sql for sql in statements if sql.startswith('UPDATE attendance_records')])==1
     assert len(attendance.detail(sid)['movements'])==1
+
+
+def test_active_session_id_lookup_and_shared_camera(tmp_path):
+    from shared_camera import SharedCamera
+    store = Store(tmp_path / 'private' / 'test.sqlite3')
+    store.enroll('A', [vector()] * 5)
+    attendance = Attendance(store)
+    assert attendance.active_session_id() is None
+
+    sid = attendance.start('Active Session')['id']
+    assert attendance.active_session_id() == sid
+
+    shared = SharedCamera(attendance)
+
+    def unexpected_sessions_call():
+        pytest.fail('SharedCamera must use active_session_id() instead of full sessions() query')
+
+    attendance.sessions = unexpected_sessions_call
+
+    shared.connect()
+    shared.attendance_changed()
+    assert attendance.active_session_id() == sid
+
+    attendance.finish(sid)
+    assert attendance.active_session_id() is None
