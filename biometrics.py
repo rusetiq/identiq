@@ -326,6 +326,18 @@ class Store:
                 LEFT JOIN embeddings e ON p.id=e.person_id GROUP BY p.id ORDER BY p.id DESC
             """, (EMBEDDING_DIMENSION * 4,))]
 
+    def person(self, person_id):
+        # Fetch a single person profile by primary key in O(1) time instead of
+        # scanning all people and embeddings across the entire database.
+        with self.connect() as db:
+            row = db.execute("""
+                SELECT p.*, count(e.person_id) AS samples,
+                    coalesce(sum(length(e.vector)=?),0) AS compatible_samples,
+                    coalesce(sum(e.source='iphone_truedepth'),0) AS iphone_samples FROM people p
+                LEFT JOIN embeddings e ON p.id=e.person_id WHERE p.id=? GROUP BY p.id
+            """, (EMBEDDING_DIMENSION * 4, person_id)).fetchone()
+            return dict(row) if row else None
+
     def save_profile(self, data, person_id=None):
         fields=('name','person_type','student_id','grade','section','academic_year','employee_code','class_name')
         with self.lock,self.connect() as db:
@@ -357,7 +369,7 @@ class Store:
                     person_id=db.execute('INSERT INTO people('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',[values[f] for f in fields]).lastrowid
             except sqlite3.IntegrityError as error:
                 raise FaceError('duplicate_school_id','That admission number or employee code is already assigned.') from error
-        return next(person for person in self.people() if person['id']==person_id)
+        return self.person(person_id)
 
     def update_student_profile(self, person_id, student_id, class_name):
         for value in (student_id,class_name):
@@ -368,7 +380,7 @@ class Store:
                 raise FaceError('person_missing','That student enrollment was not found.')
             try:db.execute('UPDATE people SET student_id=?,class_name=? WHERE id=?',(student_id.strip(),class_name.strip(),person_id))
             except sqlite3.IntegrityError as error:raise FaceError('duplicate_student_id','That student ID is already assigned.') from error
-        return next(person for person in self.people() if person['id']==person_id)
+        return self.person(person_id)
 
     def candidates_batch(self, embeddings, top_two=False):
         """One version-checked snapshot and one matrix multiplication for a frame."""

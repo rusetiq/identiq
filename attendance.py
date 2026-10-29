@@ -69,10 +69,21 @@ class Attendance:
                 WHERE r.session_id=? ORDER BY m.id DESC LIMIT 200""",(session_id,))]
         result = dict(session)
         result['movements']=events
-        result['movement_counts']={state:sum(row['campus_state']==state for row in roster) for state in ('on_campus','checked_out','not_arrived','unknown')}
+        # Aggregate movement_counts and counts in a single pass over roster
+        # instead of iterating over roster 7 separate times.
+        m_counts = {'on_campus': 0, 'checked_out': 0, 'not_arrived': 0, 'unknown': 0}
+        counts = {'present': 0, 'absent': 0, 'pending': 0}
+        for row in roster:
+            state = row['campus_state']
+            if state in m_counts:
+                m_counts[state] += 1
+            status = row['status']
+            if status in counts:
+                counts[status] += 1
+        counts["total"] = len(roster)
+        result['movement_counts'] = m_counts
         result["roster"] = roster
-        result["counts"] = {status: sum(row["status"] == status for row in roster) for status in ("present", "absent", "pending")}
-        result["counts"]["total"] = len(roster)
+        result["counts"] = counts
         return result
 
     def start(self, name, class_name='', person_type='',academic_year=''):
