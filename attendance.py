@@ -11,7 +11,7 @@ from contextlib import closing
 from biometrics import FaceError
 from iphone import valid_name
 from attendance_policy import (MATCH_THRESHOLD, MATCH_MARGIN, CONFIRMATIONS,
-    MIN_INTERVAL, MIN_DURATION, MAX_GAP, MAX_FRAME_AGE, LAST_SEEN_INTERVAL, quality_issue)
+    MIN_INTERVAL, MIN_DURATION, MAX_GAP, MAX_FRAME_AGE, MAX_BUFFER_AGE, LAST_SEEN_INTERVAL, quality_issue)
 
 
 class Attendance:
@@ -241,7 +241,7 @@ class Attendance:
                 and dy <= 1.5 * max(box[3], old[3]) + 1e-8)
 
     def observe_group(self, session_id, scanner_id, recognitions, action='check_in', axis='x', direction='positive',
-                      frame_id=None, received_at=None):
+                      frame_id=None, received_at=None, capture_age_ms=None):
         self.movement_options(action,axis,direction)
         scanner_id = self.scanner(scanner_id)
         with self.store.lock, self.store.connect() as db:
@@ -252,18 +252,27 @@ class Attendance:
             if type(received_at) not in (int, float) or not math.isfinite(received_at):
                 self.reset(session_id, scanner_id)
                 return [self.outcome('stale_frame', message='Invalid camera timing. No attendance saved.') for _ in recognitions]
+            if capture_age_ms is not None and (type(capture_age_ms) not in (int,float) or
+                    not math.isfinite(capture_age_ms) or not 0 <= capture_age_ms <= MAX_BUFFER_AGE*1000):
+                self.reset(session_id, scanner_id)
+                return [self.outcome('stale_frame', message='Camera frame is too old. No attendance saved.') for _ in recognitions]
+            captured_at = received_at - capture_age_ms/1000 if capture_age_ms is not None else received_at
+            # Older clients do not send capture age; retain their existing
+            # processing-time confirmation behavior.
+            evidence_time = captured_at if capture_age_ms is not None else now
             last = self.frames.get(frame_key)
             # Check before pruning identities: a late frame must not erase newer evidence.
-            if last and received_at < last['received_at']:
+            if last and (received_at < last['received_at'] or captured_at < last.get('captured_at', last['received_at'])):
                 return [self.outcome('stale_frame', message='Discarded an out-of-order camera frame.') for _ in recognitions]
             self.frames = {key:value for key,value in self.frames.items() if now-value['time'] < 30}
             if len(self.frames) >= 256 and frame_key not in self.frames:
                 self.frames.pop(next(iter(self.frames)))
-            self.frames[frame_key] = {'received_at':received_at, 'time':now}
             if (not isinstance(frame_id,str) or len(frame_id) != 64 or
-                    not 0 <= now-received_at <= MAX_FRAME_AGE):
+                    not 0 <= now-received_at <= MAX_FRAME_AGE or
+                    not 0 <= now-captured_at <= MAX_FRAME_AGE):
                 self.reset(session_id, scanner_id)
                 return [self.outcome('stale_frame', message='Waiting for a fresh camera frame. No attendance saved.') for _ in recognitions]
+            self.frames[frame_key] = {'received_at':received_at, 'captured_at':captured_at, 'time':now}
             counts = {}
             for item in recognitions:
                 if item['status'] == 'matched':
@@ -273,19 +282,19 @@ class Attendance:
             self.crossings = {key:value for key,value in self.crossings.items()
                               if key[:2] != frame_key or key[2] in present_ids}
             self.sightings = {key:value for key,value in self.sightings.items()
-                              if now-value['time'] <= MAX_GAP and (key[:2] != frame_key or key[2] in present_ids)}
+                              if evidence_time-value['time'] <= MAX_GAP and (key[:2] != frame_key or key[2] in present_ids)}
             ids = list(present_ids)
             roster = {row['person_id']:row for row in db.execute(
                 'SELECT * FROM attendance_records WHERE session_id=? AND person_id IN (' + ','.join('?' for _ in ids) + ')',
                 (session_id, *ids))} if ids else {}
-            return [self._observe(db, session_id, scanner_id, item, now, action, axis, direction, frame_id, roster.get(item['person']['id']))
+            return [self._observe(db, session_id, scanner_id, item, evidence_time, action, axis, direction, frame_id, roster.get(item['person']['id']))
                     if item['status'] == 'matched' and counts[item['person']['id']] == 1
                     else self.outcome('unrecognized') for item in recognitions]
 
     def observe(self, session_id, scanner_id, recognition, action='check_in', axis='x', direction='positive',
-                frame_id=None, received_at=None):
+                frame_id=None, received_at=None, capture_age_ms=None):
         return self.observe_group(session_id, scanner_id, [recognition], action, axis, direction,
-                                  frame_id=frame_id, received_at=received_at)[0]
+                                  frame_id=frame_id, received_at=received_at, capture_age_ms=capture_age_ms)[0]
 
     def _observe(self, db, session_id, scanner_id, recognition, now, action, axis, direction, frame_id, row):
         person_id = recognition['person']['id']

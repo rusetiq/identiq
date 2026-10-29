@@ -1,4 +1,104 @@
+## 29 October 2026: per-person queues and repeated-input inference
+
+Each provisional identity now has a four-frame queue. The queues share scene
+images and upload each scene once; the server re-identifies every face instead
+of trusting the queue's identity. Missing or ambiguous identities drop their
+queues. The existing age, ordering and confirmation rules remain in force.
+
+A bounded memory cache holds up to 80 SHA-256 hashes of exact aligned model
+inputs and their validated embeddings for 1.5 seconds. It retains no camera
+images or names. Changed inputs still run inference; quality, identity matching
+and attendance checks always run. Returned arrays cannot mutate cached values.
+Expired entries are removed on the next lookup, or when the process exits.
+
+A local synthetic four-face CPU test measured 70.37 ms without reuse and 0.45 ms
+with identical-input reuse (median of 15 warm runs, identical embeddings).
+Detection was stubbed; this excludes detection, upload and matching. Core ML
+was unavailable in the sandbox during this test. This is a duplicate-input
+saving, not evidence of faster inference on new walking-face images. The normal
+inference benchmark disables this cache to avoid inflated speedup reports.
+
 # Performance and reliability update
+
+## Walking confirmation buffer
+
+Attendance scanning samples the camera approximately every 300 ms while an
+inference is running. After a possible match, up to four recent frames are
+processed in capture order. Frames older than 1.5 seconds are dropped before
+submission, and the server rejects a frame if its reported buffer age is
+invalid, it arrives out of capture order, or its reported age plus server work
+exceeds three seconds. Requests remain sequential. Each frame independently
+passes the existing quality, match, ambiguity, continuity and movement checks;
+three distinct decoded images over at least 0.6 seconds are still required.
+
+Capture age is reported by the camera device and is not proof that an image was
+live. Duplicate detection hashes decoded pixels, so changing JPEG metadata
+alone does not create another confirmation. This took a median 0.84 ms for a
+synthetic 1280×720 frame over 30 runs on the development laptop. Delayed
+offline frames are discarded rather than submitted as fresh attendance; brief
+offline images in browser storage expire at the next queue cleanup.
+
+## 29 October 2026: Apple silicon inference
+
+On Apple silicon Macs with the Core ML execution provider, ArcFace now uses the
+same model with hardware acceleration. At startup the app compares a synthetic
+embedding with the CPU result and uses CPU inference if initialization or that
+check fails. If accelerated inference fails or produces an invalid embedding,
+the app retries on the CPU. Windows and other systems keep the existing CPU
+path. Set `IDENTIQ_INFERENCE_BACKEND=cpu` before starting the server to use the
+CPU explicitly.
+
+Five alternating warm runs on the development Mac used the installed model and
+synthetic 128-pixel crops. The time includes crop quality and alignment but
+excludes face detection, network, database matching and the required attendance
+confirmation period.
+
+| Faces | CPU | Core ML | Speedup |
+| --- | --- | --- | --- |
+| 1 | 35.9 ms | 10.1 ms | 3.55× |
+| 4 | 71.2 ms | 22.6 ms | 3.15× |
+| 8 | 131.1 ms | 44.3 ms | 2.96× |
+| 20 | 334.4 ms | 118.3 ms | 2.83× |
+
+The largest normalized embedding difference across those samples was below
+0.000001. This synthetic check does not establish real-world recognition
+accuracy; evaluate genuine and impostor captures on each deployment. Matching
+thresholds, quality limits and three-frame confirmation remain unchanged.
+Initial compilation can take longer and stores about 333 MB of compiled model
+files under `data/coreml-cache`; the cache contains model weights, not camera
+frames or enrolled identity data.
+
+## 28 October 2026
+
+Group recognition now runs up to four independent ArcFace inferences concurrently
+through the existing CPU session, capped by the machine's CPU count. Each inference
+still uses one internal thread. Quality rejection runs first, detection order is
+preserved when jobs finish out of order, and the engine finishes all jobs for one
+frame before releasing its lock. Single-face inference uses the direct path.
+
+Five alternating warm runs on the development laptop measured these medians using
+the installed ArcFace model and synthetic crops:
+
+| Faces | Serial | Parallel | Speedup |
+| --- | --- | --- | --- |
+| 1 | 35.18 ms | 35.22 ms | 1.00× |
+| 4 | 140.99 ms | 68.50 ms | 2.06× |
+| 8 | 279.68 ms | 123.37 ms | 2.27× |
+| 20 | 703.42 ms | 303.79 ms | 2.32× |
+
+Normalized embeddings were identical in these runs. This measures quality checks,
+alignment and inference, excluding detection, matching, camera capture and Wi-Fi.
+School hardware and real-world recognition performance still require measurement.
+Reproduce with `.venv/bin/python scripts/benchmark_inference.py --runs 5`; it never
+opens the identity database or camera.
+
+Ordinary recognition waits 150 ms between visible-face requests instead of
+650 ms. Attendance scheduling accounts for the previous inference duration when
+estimating when to send the next frame, with a 40 ms minimum delay and slower
+empty-scene polling. The later walking confirmation buffer described above
+supersedes the previous capture-on-request behavior. Server-side frame freshness,
+quality, similarity, ambiguity, spacing and three-frame confirmation checks remain
+authoritative. Restart the server and refresh camera pages to load these changes.
 
 ## 22 October 2026
 

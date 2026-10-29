@@ -1,10 +1,17 @@
 """Local YuNet detection, ArcFace embeddings, and SQLite identity storage."""
 import base64
 import binascii
+import hashlib
 import io
 import json
+import logging
+import os
+import platform
 import sqlite3
 import threading
+import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -13,13 +20,14 @@ import numpy as np
 # pyrefly: ignore[missing-import]
 import onnxruntime as ort
 from PIL import Image
-from attendance_policy import MATCH_THRESHOLD, MATCH_MARGIN, quality_issue
+from attendance_policy import MATCH_THRESHOLD, MATCH_MARGIN, MIN_FACE_PIXELS, quality_issue
 
 SAMPLES = 5
 MAX_FACES = 20
 EMBEDDING_DIMENSION = 512
 ENROLLMENT_THRESHOLD = 0.45
 ENROLLMENT_MARGIN = 0.06
+logger = logging.getLogger(__name__)
 
 # The five-point ArcFace reference landmark locations for a 112 x 112 crop.
 ARCFACE_REFERENCE = np.asarray([
@@ -71,25 +79,70 @@ def decode_frame(value):
     return frame
 
 
+def _cpu_recognizer(model_path):
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    return ort.InferenceSession(str(model_path), sess_options=options,
+                                providers=['CPUExecutionProvider'])
+
+
+def _recognizer_for_device(model_path, cache_root):
+    """Use the same ArcFace model on Apple silicon, with a verified CPU fallback."""
+    cpu = _cpu_recognizer(model_path)
+    use_coreml = (platform.system() == 'Darwin' and platform.machine() == 'arm64'
+                  and os.environ.get('IDENTIQ_INFERENCE_BACKEND', '').lower() != 'cpu'
+                  and 'CoreMLExecutionProvider' in ort.get_available_providers())
+    if not use_coreml:
+        return cpu, False
+    try:
+        # The cache contains compiled model weights, never camera frames or
+        # enrolled identities. Partition it by model bytes and runtime version.
+        with model_path.open('rb') as model:
+            model_hash = hashlib.file_digest(model, 'sha256').hexdigest()
+        cache_dir = cache_root / f'{model_hash}-{ort.__version__}'
+        cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        # This model's batch dimension is named 'None'; each request is one face.
+        options.add_free_dimension_override_by_name('None', 1)
+        accelerated = ort.InferenceSession(str(model_path), sess_options=options, providers=[
+            ('CoreMLExecutionProvider', {'ModelFormat':'MLProgram', 'MLComputeUnits':'ALL',
+                                         'ModelCacheDirectory':str(cache_dir)}),
+            'CPUExecutionProvider',
+        ])
+        probe = np.linspace(-1, 1, 3*112*112, dtype=np.float32).reshape(1, 3, 112, 112)
+        cpu_output = normalize(cpu.run(None, {cpu.get_inputs()[0].name:probe})[0])
+        accelerated_output = normalize(accelerated.run(None, {accelerated.get_inputs()[0].name:probe})[0])
+        if not np.allclose(cpu_output, accelerated_output, rtol=0, atol=1e-5):
+            raise ValueError('accelerated model failed the CPU consistency check')
+        logger.info('Using Core ML for ArcFace inference')
+        return accelerated, True
+    except Exception as error:
+        logger.warning('Core ML unavailable; using CPU inference: %s', error)
+        return cpu, False
+
+
 class FaceEngine:
     def __init__(self, model_dir):
         self.lock = threading.Lock()
-        # Retaining thousands of proposed boxes is wasted work for a school
-        # scanner that accepts at most MAX_FACES people in one frame. Keeping
-        # a small headroom preserves crowded-frame detection while cutting the
-        # detector's post-processing cost on modest CPUs.
         self.detector = cv2.FaceDetectorYN.create(
             str(model_dir / "face_detection_yunet_2023mar.onnx"), "", (640, 480), 0.75, 0.3, max(80, MAX_FACES * 4))
         model_path = model_dir / "arcface_w600k_r50.onnx"
         if not model_path.is_file():
             raise FaceError("models_missing", "Install the research face model: python scripts/download_models.py")
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 1
-        options.inter_op_num_threads = 1
-        self.recognizer = ort.InferenceSession(str(model_path), sess_options=options,
-                                               providers=["CPUExecutionProvider"])
+        self._model_path = model_path
+        self._model_fallback_lock = threading.Lock()
+        self.recognizer, self._accelerated = _recognizer_for_device(
+            model_path, model_dir.parent / 'data' / 'coreml-cache')
         self.recognizer_input = self.recognizer.get_inputs()[0].name
         self.recognizer_output = self.recognizer.get_outputs()[0].name
+        self._embedding_cache = OrderedDict()
+        self._embedding_cache_lock = threading.Lock()
+        self.embedding_workers = min(4, os.cpu_count() or 1)
+        self._embedding_pool = ThreadPoolExecutor(max_workers=self.embedding_workers,
+                                                  thread_name_prefix='face-embedding')
 
     def _arcface_embedding(self, image, face):
         if hasattr(self.recognizer, "alignCrop") and hasattr(self.recognizer, "feature"):
@@ -102,8 +155,45 @@ class FaceEngine:
         aligned = cv2.warpAffine(image, transform, (112, 112), flags=cv2.INTER_LINEAR, borderValue=0)
         blob = cv2.dnn.blobFromImage(aligned, 1.0 / 127.5, (112, 112),
                                      (127.5, 127.5, 127.5), swapRB=True)
-        vector = self.recognizer.run([self.recognizer_output], {self.recognizer_input: blob})[0]
-        return normalize(vector)
+        # Only byte-identical model inputs can reuse an embedding. This does not
+        # reuse a name, a quality result, or an attendance confirmation.
+        cache = getattr(self, '_embedding_cache', None)
+        key = hashlib.sha256(memoryview(blob)).digest() if cache is not None else None
+        if cache is not None:
+            with self._embedding_cache_lock:
+                now = time.monotonic()
+                for old_key, (expires, _) in list(cache.items()):
+                    if expires <= now:
+                        del cache[old_key]
+                if key in cache:
+                    return cache[key][1].copy()
+        vector = normalize(self._run_recognizer(blob))
+        if cache is not None:
+            with self._embedding_cache_lock:
+                cache[key] = (time.monotonic() + 1.5, vector.copy())
+                cache.move_to_end(key)
+                while len(cache) > MAX_FACES * 4:
+                    cache.popitem(last=False)
+        return vector
+
+    def _run_recognizer(self, blob):
+        session = self.recognizer
+        try:
+            result = session.run([self.recognizer_output], {self.recognizer_input: blob})[0]
+            # An invalid accelerated output must not become a match. Retry it
+            # on the CPU just as we do for an execution failure.
+            normalize(result)
+            return result
+        except Exception:
+            if not getattr(self, '_accelerated', False) and session is self.recognizer:
+                raise
+            with self._model_fallback_lock:
+                if self._accelerated and session is self.recognizer:
+                    logger.warning('Core ML inference failed; switching to CPU inference')
+                    self.recognizer = _cpu_recognizer(self._model_path)
+                    self._accelerated = False
+                session = self.recognizer
+            return session.run([self.recognizer_output], {self.recognizer_input: blob})[0]
 
     def _detect_at_size(self, image, max_side):
         height, width = image.shape[:2]
@@ -150,9 +240,18 @@ class FaceEngine:
         # color conversion, image resizing, and Laplacian calculations.
         if min(w, h) < 64 or min(w / width, h / height) < minimum_fraction:
             return {**details, "status": "adjust", "code": "too_small", "message": "Face detected. Move closer so your face fills more of the frame."}, face
-        crop = image[max(0, int(y)):min(height, int(y+h)), max(0, int(x)):min(width, int(x+w))]
+        left, right = max(0, min(width, int(x))), max(0, min(width, int(x+w)))
+        top, bottom = max(0, min(height, int(y))), max(0, min(height, int(y+h)))
+        crop = image[top:bottom, left:right]
         if crop.size == 0:
             return {**details, "status": "adjust", "code": "blurry", "message": "Face detected, but details are very soft. Hold still and check camera focus."}, face
+        # A detector box can extend beyond the image. Only count pixels that
+        # actually exist in the crop when enforcing the face-size safeguards.
+        quality['face_size_px'] = min(quality['face_size_px'], *crop.shape[:2])
+        if quality['face_size_px'] < 64:
+            return {**details, "status": "adjust", "code": "too_small", "message": "Keep your whole face in the camera view and move closer."}, face
+        if attendance and quality['face_size_px'] < MIN_FACE_PIXELS:
+            return {**details, 'status':'adjust', **quality_issue(quality)}, face
         # Keep resize before grayscale conversion: uint8 rounding changes sharpness
         # near the recognition and attendance cutoffs if these operations are swapped.
         gray = cv2.cvtColor(cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
@@ -184,14 +283,28 @@ class FaceEngine:
         if len(detected) > MAX_FACES:
             return {"status": "adjust", "code": "too_many_faces", "face_count": len(detected), "faces": [],
                     "message": f"Up to {MAX_FACES} faces can be scanned together. Split into smaller groups."}
-        faces = []
+        faces, ready_faces = [], []
         for face in detected:
             # Attendance can recognize a small, clear face in a wide scene;
             # enrollment still requires a face that fills enough of the frame.
             analysis, _ = self._quality(image, face,minimum_fraction=0,attendance=attendance)
             if extract and analysis['status'] == 'ready':
-                analysis['embedding'] = self._arcface_embedding(image, face)
+                ready_faces.append((analysis, face))
             faces.append(analysis)
+        pool = getattr(self, '_embedding_pool', None)
+        if pool is not None and len(ready_faces) > 1:
+            futures = [pool.submit(self._arcface_embedding, image, face) for _, face in ready_faces]
+            try:
+                # Preserve detection order even when a later face finishes first.
+                for (analysis, _), future in zip(ready_faces, futures):
+                    analysis['embedding'] = future.result()
+            finally:
+                # Finish this frame's jobs before releasing the engine lock,
+                # including when one face fails alignment or inference.
+                wait(futures)
+        else:
+            for analysis, face in ready_faces:
+                analysis['embedding'] = self._arcface_embedding(image, face)
         ready = sum(face['status'] == 'ready' for face in faces)
         return {"status": "ready" if ready else "adjust", "face_count": len(faces), "ready_count": ready, "faces": faces,
                 "code": None if ready else "no_face" if not faces else "quality",

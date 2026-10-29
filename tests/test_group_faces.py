@@ -1,6 +1,11 @@
+import io
+import json
 import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+import cv2
 import pytest
 
 from biometrics import FaceError, MAX_FACES, EMBEDDING_DIMENSION
@@ -41,6 +46,44 @@ def test_one_bad_face_does_not_block_a_good_face():
     assert 'embedding' not in result['faces'][1]
 
 
+def test_parallel_embeddings_keep_faces_in_detection_order():
+    detector=group_engine();second_finished=threading.Event()
+    class OutOfOrderRecognizer(Recognizer):
+        def feature(self,x):
+            if x < 150:
+                assert second_finished.wait(2), 'Other face should run concurrently'
+            else:
+                second_finished.set()
+            return super().feature(x)
+    detector.recognizer=OutOfOrderRecognizer()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        detector._embedding_pool=pool
+        result=detector.extract_group(smooth_image())
+    assert result['ready_count']==2
+    assert np.array_equal(result['faces'][0]['embedding'],vector(0))
+    assert np.array_equal(result['faces'][1]['embedding'],vector(1))
+    assert result['faces'][0]['box'][0] < result['faces'][1]['box'][0]
+
+
+def test_parallel_inference_propagates_errors_without_returning_partial_matches():
+    detector=group_engine();second_started=threading.Event()
+    class FailingRecognizer(Recognizer):
+        def feature(self,x):
+            if x < 150:
+                assert second_started.wait(2)
+                raise FaceError('invalid_embedding','Cannot read this face')
+            second_started.set()
+            return super().feature(x)
+    detector.recognizer=FailingRecognizer()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        detector._embedding_pool=pool
+        with pytest.raises(FaceError,match='Cannot read this face'):
+            detector.extract_group(smooth_image())
+        assert not detector.lock.locked()
+        detector.recognizer=Recognizer()
+        assert detector.extract_group(smooth_image())['ready_count']==2
+
+
 @pytest.mark.parametrize('reason',['small','detection'])
 def test_attendance_rejects_unusable_faces_before_recognition_work(reason):
     detector=group_engine();calls=[]
@@ -74,6 +117,32 @@ def response_faces(vectors):
 
 def scan_group(client,headers,image,sid,scanner):
     return client.post('/api/recognize/group',json={'image':fresh_image(image),'attendance_session_id':sid,'scanner_id':scanner},headers=headers)
+
+
+def test_full_resolution_binary_scans_still_require_three_fresh_frames(setup, image):
+    client,headers,detector,_=setup
+    enroll(client,headers,image)
+    sid=start(client,headers).json['session']['id'];moment=clock(client)
+    scanner=str(uuid.uuid4());received_sizes=[]
+    def detect(frame):
+        received_sizes.append(frame.shape[:2])
+        return response_faces([vector()])
+    detector.extract_attendance_group=detect
+    for index in range(3):
+        picture=np.zeros((720,1280,3),dtype=np.uint8)
+        cv2.putText(picture,str(index),(30,60),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,255),2)
+        ok,jpeg=cv2.imencode('.jpg',picture,[cv2.IMWRITE_JPEG_QUALITY,78])
+        assert ok
+        payload={'attendance_session_id':sid,'scanner_id':scanner,'capture_age_ms':0}
+        result=client.post('/api/recognize/group',headers=headers,data={
+            'payload':json.dumps(payload),'image':(io.BytesIO(jpeg.tobytes()),'frame.jpg')
+        })
+        assert result.status_code==200
+        tracking=result.json['faces'][0]['attendance']
+        assert tracking['confirmations']==index+1
+        assert tracking['newly_present']==(index==2)
+        moment[0]+=.35
+    assert received_sizes==[(720,1280)]*3
 
 
 def prepare(setup,image):

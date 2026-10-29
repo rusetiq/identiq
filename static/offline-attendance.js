@@ -3,7 +3,7 @@
 // that could not reach the local attendance laptop. Recognition still runs on
 // the laptop after reconnection, using the normal database and policy.
 window.IdentiqOfflineAttendance=(()=>{
-  const DB_NAME='identiq-offline-attendance',STORE='frames',MAX_ITEMS=36,MAX_AGE=15*60*1000;
+  const DB_NAME='identiq-offline-attendance',STORE='frames',MAX_ITEMS=4,MAX_AGE=1500;
   let database;
   function open(){
     if(database)return database;

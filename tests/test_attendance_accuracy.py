@@ -1,5 +1,6 @@
 """Regression checks for false presence, using controlled impostor similarities."""
 import hashlib
+import base64
 import uuid
 
 import numpy as np
@@ -70,6 +71,93 @@ def test_replaying_identical_pixels_cannot_build_confirmation(setup, image, grou
         assert not face['attendance']['newly_moved']
         moment[0]+=.35
     no_attendance(client, sid)
+
+
+def test_reencoding_metadata_cannot_turn_one_image_into_multiple_confirmations(setup, image):
+    client,headers,engine,sid,moment,scanner=prepare(setup,image)
+    engine.extract_group=lambda frame:response_faces([engine.vector])
+    raw=base64.b64decode(image.split(',',1)[1])
+    for index in range(4):
+        altered='data:image/jpeg;base64,'+base64.b64encode(raw+bytes([index])).decode()
+        result=client.post('/api/recognize/group',headers=headers,json={'image':altered,'attendance_session_id':sid,'scanner_id':scanner,'capture_age_ms':0}).json
+        assert result['faces'][0]['attendance']['confirmations']==1
+        moment[0]+=.35
+    no_attendance(client,sid)
+
+
+def test_buffered_frames_use_capture_spacing_not_processing_spacing(setup, image):
+    client,headers,engine,sid,moment,scanner=prepare(setup,image)
+    engine.extract_group=lambda frame:response_faces([engine.vector])
+    for received,age,expected in [(100,0,1),(100.9,600,2),(101.2,580,3)]:
+        moment[0]=received
+        result=client.post('/api/recognize/group',headers=headers,json={'image':fresh_image(image),'attendance_session_id':sid,'scanner_id':scanner,'capture_age_ms':age}).json
+        tracking=result['faces'][0]['attendance']
+        assert tracking['confirmations']==expected
+        assert tracking['newly_present']==(expected==3)
+
+
+def test_fast_captured_frames_cannot_be_confirmed_by_slow_processing(setup, image):
+    client,headers,engine,sid,moment,scanner=prepare(setup,image)
+    engine.extract_group=lambda frame:response_faces([engine.vector])
+    for received,age in [(100,0),(100.35,300),(100.7,600)]:
+        moment[0]=received
+        result=client.post('/api/recognize/group',headers=headers,json={'image':fresh_image(image),'attendance_session_id':sid,'scanner_id':scanner,'capture_age_ms':age}).json
+        assert result['faces'][0]['attendance']['confirmations']==1
+    no_attendance(client,sid)
+
+
+def test_buffered_frame_is_rejected_when_processing_makes_it_too_old(setup,image):
+    client,headers,engine,sid,moment,scanner=prepare(setup,image)
+    def slow(frame):
+        moment[0]+=2.1
+        return response_faces([engine.vector])
+    engine.extract_attendance_group=slow
+    result=client.post('/api/recognize/group',headers=headers,json={'image':fresh_image(image),'attendance_session_id':sid,'scanner_id':scanner,'capture_age_ms':1000}).json
+    assert result['faces'][0]['attendance']['status']=='stale_frame'
+    no_attendance(client,sid)
+
+
+@pytest.mark.parametrize('age',[-1,1501,'300',True,float('nan')])
+def test_invalid_or_expired_buffered_frames_cannot_mark_attendance(setup,image,age):
+    client,headers,engine,sid,moment,scanner=prepare(setup,image)
+    engine.extract_group=lambda frame:response_faces([engine.vector])
+    for _ in range(3):
+        result=client.post('/api/recognize/group',headers=headers,json={'image':fresh_image(image),'attendance_session_id':sid,'scanner_id':scanner,'capture_age_ms':age}).json
+        assert result['faces'][0]['attendance']['status']=='stale_frame'
+        moment[0]+=.7
+    no_attendance(client,sid)
+
+
+def test_out_of_order_buffered_frame_does_not_reset_newer_evidence(setup,image):
+    client,headers,engine,sid,moment,scanner=prepare(setup,image)
+    engine.extract_group=lambda frame:response_faces([engine.vector])
+    def scan(received,age):
+        moment[0]=received
+        return client.post('/api/recognize/group',headers=headers,json={'image':fresh_image(image),'attendance_session_id':sid,'scanner_id':scanner,'capture_age_ms':age}).json['faces'][0]['attendance']
+    assert scan(100,0)['confirmations']==1
+    assert scan(100.5,200)['confirmations']==2
+    assert scan(100.6,400)['status']=='stale_frame'
+    assert scan(100.9,280)['newly_present']
+
+
+def test_buffered_walking_frames_still_require_confirmed_line_crossing(setup,image):
+    client,headers,engine,sid,moment,scanner=prepare(setup,image)
+    positions=iter([.52,.34,.10])
+    def detect(frame):
+        result=response_faces([engine.vector])
+        result['faces'][0]['box']=[next(positions),.1,.32,.4]
+        return result
+    engine.extract_attendance_group=detect
+    for index,(received,age) in enumerate([(100,0),(100.9,600),(101.2,580)]):
+        moment[0]=received
+        result=client.post('/api/recognize/group',headers=headers,json={
+            'image':fresh_image(image),'attendance_session_id':sid,'scanner_id':scanner,
+            'capture_age_ms':age,'attendance_action':'automatic','crossing_axis':'x','entry_direction':'positive'
+        }).json
+        update=result['faces'][0]['attendance']
+        assert update['confirmations']==index+1
+        assert update['newly_moved']==(index==2)
+    assert client.application.extensions['attendance'].detail(sid)['movement_counts']['on_campus']==1
 
 
 @pytest.mark.parametrize('group', [False, True])

@@ -63,6 +63,46 @@ def test_small_face_reports_position_instead_of_lighting():
     assert "box" in result and len(result["landmarks"]) == 5
 
 
+@pytest.mark.parametrize('x,attendance,visible,expected', [
+    (220, False, 36, 'too_small'),
+    (180, True, 76, 'too_small'),
+    (140, True, 116, None),
+])
+def test_face_size_counts_only_pixels_visible_in_frame(x, attendance, visible, expected):
+    picture = np.random.default_rng(3).integers(0, 256, (256, 256, 3), dtype=np.uint8)
+    detected = face(120)[0].copy()
+    detected[0] = x
+    result, _ = engine(None)._quality(picture, detected, minimum_fraction=0, attendance=attendance)
+    assert result['quality']['face_size_px'] == visible
+    if expected:
+        assert result['status'] == 'adjust' and result['code'] == expected
+    else:
+        assert result['status'] == 'ready'
+
+
+@pytest.mark.parametrize('x,y', [(-200, 64), (64, -200), (300, 64), (64, 300)])
+def test_face_box_outside_frame_cannot_use_unrelated_image_pixels(x, y):
+    picture = np.random.default_rng(4).integers(0, 256, (256, 256, 3), dtype=np.uint8)
+    detected = face(120)[0].copy()
+    detected[:2] = x, y
+    result, _ = engine(None)._quality(picture, detected, minimum_fraction=0, attendance=True)
+    assert result['status'] == 'adjust'
+
+
+def test_group_detection_uses_the_full_resolution_pass_for_small_faces():
+    detector = engine(None)
+    picture = np.zeros((720,1280,3), np.uint8)
+    calls = []
+    small = face(100)
+    def detect_at_size(image, side):
+        calls.append(side)
+        return small.copy()
+    detector._detect_at_size = detect_at_size
+    found = detector._detect(picture, max_side=960, far=True)
+    assert calls == [960, 1280]
+    assert len(found) == 1  # The same face in both passes is deduplicated.
+
+
 @pytest.mark.parametrize('size,minimum_fraction', [(40, 0), (80, .2)])
 def test_small_faces_skip_image_processing(monkeypatch, size, minimum_fraction):
     def unexpected_processing(*args, **kwargs):

@@ -258,8 +258,9 @@ def create_app(database=None, engine=None, allowed_hosts=None):
         return payload()
 
     def frame_fingerprint(value, frame):
-        raw=value.encode() if isinstance(value,str) else bytes(value) if isinstance(value,(bytes,bytearray)) else frame.tobytes()
-        return hashlib.sha256(raw).hexdigest()
+        # Hash decoded pixels so changing JPEG metadata cannot make the same
+        # camera image count as an independent confirmation.
+        return hashlib.sha256(memoryview(frame)).hexdigest()
 
     @app.get('/parents')
     def parent_page():
@@ -435,7 +436,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             with store.lock,shared.lock:
                 shared.guard(data)
                 tracking=attendance.observe(session_id,scanner_id,{**recognition,'box':box,'quality':analysis.get('quality',{})},action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive'),
-                    frame_id=frame_fingerprint(data.get('image'),frame),received_at=received_at)
+                    frame_id=frame_fingerprint(data.get('image'),frame),received_at=received_at,capture_age_ms=data.get('capture_age_ms'))
             if tracking.get('newly_moved'):shared.attendance_changed()
         return jsonify(**recognition, box=box, threshold=MATCH_THRESHOLD, attendance=tracking,
                        processing_ms=round((time.perf_counter()-processing_started)*1000,1))
@@ -478,7 +479,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
                 with store.lock,shared.lock:
                     shared.guard(data)
                     updates = attendance.observe_group(session_id, scanner_id, faces, data.get('attendance_action','check_in'),data.get('crossing_axis','x'),data.get('entry_direction','positive'),
-                        frame_id=frame_fingerprint(data.get('image'),frame),received_at=received_at)
+                        frame_id=frame_fingerprint(data.get('image'),frame),received_at=received_at,capture_age_ms=data.get('capture_age_ms'))
                 if any(update.get('newly_moved') for update in updates):shared.attendance_changed()
                 for face, update in zip(faces, updates):
                     face['attendance'] = update
