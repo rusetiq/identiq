@@ -172,7 +172,7 @@ async function startCamera() {
   $("camera-label").textContent="CONNECTING";updateControls();
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera capture requires localhost or HTTPS. Open http://localhost:8080 on the laptop to share its camera.");
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 15 } } });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: state.mode === "attendance" ? "environment" : "user" }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } });
     if(cameraGeneration!==state.cameraGeneration){stream.getTracks().forEach(track=>track.stop());return;}
     state.stream=stream;$("video").srcObject = stream;
     await $("video").play();
@@ -302,10 +302,10 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
   let failures=0;
   const attendancePayload=(image,captureAgeMs)=>({image,capture_age_ms:captureAgeMs,person_id:null,...sharedContext,attendance_session_id:attendanceSessionId,scanner_id:scannerId,attendance_action:state.movementMode,crossing_axis:$("crossing-axis").value,entry_direction:$("entry-direction").value});
   // Retain camera detail for smaller faces; frame() never upscales the source.
-  const recognitionFrame=()=>frame(captureCanvas,1280,.78);
+  const recognitionFrame=()=>frame(captureCanvas,1920,.78);
   // Capture while inference runs so a walking person can still be confirmed.
   // Keep a small, chronological, in-memory buffer and discard old images.
-  const pendingFrames=window.IdentiqScan.faceBuffer();let lastCapturedAt=-Infinity,allowBuffered=false;
+  const pendingFrames=window.IdentiqScan.faceBuffer();let lastCapturedAt=-Infinity;
   const captureFresh=()=>{const capturedAt=performance.now(),image=recognitionFrame();lastCapturedAt=capturedAt;return {image,capturedAt};};
   const bufferTimer=attendanceSessionId?setInterval(()=>{
     if(!state.scanning || generation!==state.generation || !state.stream || connectionIssues.has('api'))return;
@@ -332,7 +332,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       try {
       const selected = $("person-select").value;
       let captured;
-      if(attendanceSessionId && allowBuffered)captured=pendingFrames.take(performance.now());
+      if(attendanceSessionId)captured=pendingFrames.take(performance.now());
       if(!captured){pendingFrames.clear();captured=captureFresh();}
       capturedAt=captured.capturedAt;const image=captured.image;
       const requestStarted=performance.now();
@@ -345,9 +345,8 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       failures=0;
       if(group) {
         liveTracker.accept(data,image,capturedAt);await showGroupResults(data,groupStreaks,attendanceSessionId);
-        allowBuffered=!!attendanceSessionId && pendingFrames.accept(data.faces,performance.now());
-        if(!allowBuffered)pendingFrames.clear();
-        const delay=allowBuffered && pendingFrames.has(performance.now()) ? 0 : window.IdentiqScan?.delay(data,!!attendanceSessionId) ?? (attendanceSessionId ? (data.face_count ? 250 : 600) : 650);
+        if(attendanceSessionId)pendingFrames.accept(data.faces,performance.now());
+        const delay=!!attendanceSessionId && pendingFrames.has(performance.now()) ? 0 : window.IdentiqScan?.delay(data,!!attendanceSessionId) ?? (attendanceSessionId ? (data.face_count ? 250 : 600) : 650);
         if(delay)await sleep(delay);
         continue;
       }
@@ -373,7 +372,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       }
       } catch (error) {
       if (!state.scanning || generation !== state.generation) break;
-      pendingFrames.clear();allowBuffered=false;
+      pendingFrames.clear();
       if(transientError(error)){
         if(attendanceSessionId && recognitionPayload && !sharedExecution){
           recognitionPayload.capture_age_ms=Math.max(0,performance.now()-capturedAt);
@@ -416,6 +415,8 @@ async function showGroupResults(data,streaks,sessionId) {
         if(sessionId && face.attendance?.status==='confirming') {
           name=face.person.name;
           detail=`Provisional match · ${face.attendance.confirmations} of ${face.attendance.required_confirmations} confirmations · not marked present yet`;
+        } else if(sessionId && face.attendance?.status==='tracking') {
+          name=face.person.name;detail='Identity confirmed · cross the line to record movement';
         } else name=!sessionId ? 'Confirming face…' : 'Face needs review';
       }
       if(face.attendance?.newly_moved || face.attendance?.newly_present) newlyPresent.push(`${name} ${face.attendance.action==='check_out' ? 'checked out' : 'checked in'}`);
@@ -430,6 +431,10 @@ async function showGroupResults(data,streaks,sessionId) {
   liveTracker.highlightGroup(highlights);
   const visible=holder.children.length;
   result(visible?`${confirmed} ${sessionId?'movement records':'recognized'}`:'Ready for the next person',visible?`${confirming} confirming · ${visible-confirmed-confirming} need review`:state.movementMode==='automatic' ? 'Waiting for an enrolled person to cross the line.' : 'Waiting for an enrolled person.',confirmed?'matched':'');
+  if(newlyPresent.length) showGroupResults.lastMovement={sessionId,text:newlyPresent.join(', '),at:performance.now()};
+  const lastMovement=showGroupResults.lastMovement;
+  if(sessionId && lastMovement?.sessionId===sessionId && performance.now()-lastMovement.at<5000)
+    result(lastMovement.text,'Attendance saved. Ready for the next person.','matched');
   if(newlyPresent.length) {toast(newlyPresent.join(', '));refreshAttendance(sessionId).catch(error=>{if(!transientError(error))toast(error.message);});}
 }
 

@@ -212,7 +212,7 @@ class FaceEngine:
         # A second, larger pass preserves small facial features without upscaling
         # beyond the pixels actually supplied by the device camera.
         if far and max(image.shape[:2])>max_side and (not len(faces) or np.min(faces[:,2:4])<128):
-            detailed=self._detect_at_size(image,1280)
+            detailed=self._detect_at_size(image,min(1920,max(image.shape[:2])))
             if len(detailed):
                 candidates=np.concatenate([detailed,faces])
                 kept=[]

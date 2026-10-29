@@ -9,14 +9,14 @@ test('recognition captures available camera detail without upscaling',()=>{
   const source=fs.readFileSync('static/app.js','utf8');
   vm.runInContext(source.slice(source.indexOf('function frame('),source.indexOf('async function startCamera(')),context);
   const canvas={width:0,height:0,getContext:()=>({drawImage(){}}),toDataURL:(type,quality)=>`${type}:${quality}`};
-  assert.equal(context.frame(canvas,1280,.78),'image/jpeg:0.78');
-  assert.deepEqual([canvas.width,canvas.height],[1280,720]);
+  assert.equal(context.frame(canvas,1920,.78),'image/jpeg:0.78');
+  assert.deepEqual([canvas.width,canvas.height],[1920,1080]);
   video.videoWidth=640;video.videoHeight=480;
-  context.frame(canvas,1280,.78);
+  context.frame(canvas,1920,.78);
   assert.deepEqual([canvas.width,canvas.height],[640,480]);
   video.videoWidth=1080;video.videoHeight=1920;
-  context.frame(canvas,1280,.78);
-  assert.deepEqual([canvas.width,canvas.height],[720,1280]);
+  context.frame(canvas,1920,.78);
+  assert.deepEqual([canvas.width,canvas.height],[1080,1920]);
 });
 
 test('walking scan buffers frames during inference and sends them in order',async()=>{
@@ -54,7 +54,7 @@ test('walking scan buffers frames during inference and sends them in order',asyn
   await context.scan(1);
   assert.equal(requests.length,3);
   assert.ok(captures.length>=4,'Capture continues during the first request');
-  for(const capture of captures){assert.equal(capture.maxSide,1280);assert.equal(capture.quality,.78);}
+  for(const capture of captures){assert.equal(capture.maxSide,1920);assert.equal(capture.quality,.78);}
   assert.equal(requests[0].image,'frame at 0');
   assert.equal(requests[1].image,'frame at 300');
   assert.equal(requests[1].age,700);
@@ -65,7 +65,7 @@ test('walking scan buffers frames during inference and sends them in order',asyn
   assert.equal(timers.size,0,'Stopping scanning must clear its timers');
 });
 
-test('unmatched scans discard old frames before the next recognition request',async()=>{
+test('an empty result preserves frames captured while its inference ran',async()=>{
   let time=0,nextTimer=0;const timers=new Map(),requests=[],elements=new Map();
   const advance=ms=>{
     const target=time+ms;
@@ -96,8 +96,8 @@ test('unmatched scans discard old frames before the next recognition request',as
   vm.runInContext(source.slice(source.indexOf('async function scan('),source.indexOf('async function showGroupResults(')),context);
   await context.scan(1);
   assert.equal(requests.length,2);
-  assert.equal(requests[1].image,`frame at ${requests[1].time}`);
-  assert.equal(requests[1].age,0);
+  assert.equal(requests[1].image,'frame at 300');
+  assert.equal(requests[1].age,700);
   assert.equal(timers.size,0);
 });
 

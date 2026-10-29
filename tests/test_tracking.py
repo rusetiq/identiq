@@ -160,3 +160,17 @@ def test_analyze_quality_warnings_are_trackable_responses(setup,image,code):
     response=client.post('/api/analyze',json={"image":image},headers=headers)
     assert response.status_code == 200
     assert response.json["status"] == "adjust" and response.json["code"] == code
+
+
+def test_distant_detection_uses_full_camera_detail_but_never_upscales():
+    detector = engine(None)
+    calls = []
+    def detect_at_size(image, side):
+        calls.append(side)
+        return np.empty((0,15), dtype=np.float32)
+    detector._detect_at_size = detect_at_size
+    detector._detect(np.zeros((1080,1920,3),np.uint8),max_side=960,far=True)
+    assert calls == [960,1920]
+    calls.clear()
+    detector._detect(np.zeros((480,640,3),np.uint8),max_side=960,far=True)
+    assert calls == [960]

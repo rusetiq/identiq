@@ -12,7 +12,7 @@ function scheduling(){
 test('camera follows server confirmation pacing and slows empty scenes',()=>{
   const scan=scheduling();
   assert.equal(scan.delay({face_count:3,retry_after_ms:351},true),351);
-  assert.equal(scan.delay({face_count:0},true),600);
+  assert.equal(scan.delay({face_count:0},true),100);
   assert.equal(scan.delay({face_count:3},true),250);
   assert.equal(scan.delay({retry_after_ms:351},false),650);
   assert.equal(scan.delay({face_count:3},false),150);
@@ -25,15 +25,15 @@ test('attendance pacing includes inference time while retaining a bounded delay'
   assert.equal(scan.delay({face_count:3,retry_after_ms:250,processing_ms:800},true),40);
   assert.equal(scan.delay({face_count:3,retry_after_ms:250,processing_ms:NaN},true),250);
   assert.equal(scan.delay({face_count:3,retry_after_ms:250,processing_ms:-100},true),250);
-  assert.equal(scan.delay({face_count:0,retry_after_ms:600,processing_ms:800},true),600);
+  assert.equal(scan.delay({face_count:0,retry_after_ms:600,processing_ms:800},true),100);
 });
 
 test('invalid or extreme hints cannot create a tight loop or an unbounded wait',()=>{
   const scan=scheduling();
   assert.equal(scan.delay({face_count:1,retry_after_ms:NaN},true),250);
   assert.equal(scan.delay({face_count:1,retry_after_ms:Infinity},true),250);
-  assert.equal(scan.delay({retry_after_ms:0},true),40);
-  assert.equal(scan.delay({retry_after_ms:900000},true),1000);
+  assert.equal(scan.delay({retry_after_ms:0},true),100);
+  assert.equal(scan.delay({face_count:1,retry_after_ms:900000},true),1000);
 });
 
 test('scan diagnostics distinguish request time from processing without retaining identities',()=>{
@@ -79,4 +79,11 @@ test('each provisional person has four queued frames and shared scenes are sent 
   assert.equal(buffer.take(3601),null);
   buffer.clear();
   assert.equal(buffer.accept([],4000),false);
+});
+
+test('distant and uncertain faces are retried promptly without slowing confirmation pacing',()=>{
+  const scan=scheduling();
+  assert.equal(scan.delay({face_count:1,faces:[{status:'adjust',code:'too_small'}],retry_after_ms:500},true),100);
+  assert.equal(scan.delay({face_count:1,faces:[{status:'unknown'}],retry_after_ms:500},true),100);
+  assert.equal(scan.delay({face_count:1,faces:[{status:'matched'}],retry_after_ms:351,processing_ms:0},true),351);
 });

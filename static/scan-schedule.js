@@ -3,12 +3,15 @@ window.IdentiqScan = (() => {
   let sample = null;
   function delay(data, attendance) {
     if (!attendance) return data.face_count > 0 || data.box ? 150 : 650;
+    if(!data.face_count && !data.box)return 100;
+    // Keep searching promptly when faces are visible but not yet recognizable.
+    if(Array.isArray(data.faces) && !data.faces.some(face=>face.status==='matched'))return 100;
     const hint = data.retry_after_ms;
     // The next inference also consumes time before the server can count it.
     // Use the last processing duration as an estimate; the server still checks
     // frame freshness, spacing and all confirmations for every observation.
     const processing = (data.face_count > 0 || data.box) && Number.isFinite(data.processing_ms) ? Math.max(0,data.processing_ms) : 0;
-    return Number.isFinite(hint) ? Math.max(40,Math.min(1000,Math.ceil(hint-processing))) : data.face_count ? 250 : 600;
+    return Number.isFinite(hint) ? Math.max(40,Math.min(1000,Math.ceil(hint-processing))) : data.face_count ? 250 : 100;
   }
   function record(data, requestMs) {
     // Keep only diagnostic numbers; never retain the response, names or images.
@@ -35,11 +38,12 @@ window.IdentiqScan = (() => {
           ['confirming','tracking','present','checked_out'].includes(face.attendance?.status)).map(face=>face.person.id))].slice(0,20);
         for(const id of queues.keys())if(!targets.includes(id))queues.delete(id);
         for(const id of targets)queues.set(id,prune(queues.get(id)||warmup,now));
-        warmup=[];
+        warmup=prune(warmup,now);
         return targets.length>0;
       },
       take(now) {
-        let oldest=null;
+        warmup=prune(warmup,now);
+        let oldest=warmup[0] || null;
         for(const [id,items] of queues){
           const fresh=prune(items,now);queues.set(id,fresh);
           if(fresh.length && (!oldest || fresh[0].capturedAt<oldest.capturedAt))oldest=fresh[0];
@@ -50,7 +54,7 @@ window.IdentiqScan = (() => {
         }
         return oldest;
       },
-      has(now){return [...queues.values()].some(items=>prune(items,now).length>0);},
+      has(now){return prune(warmup,now).length>0 || [...queues.values()].some(items=>prune(items,now).length>0);},
       clear(){queues.clear();warmup=[];targets=[];},
     };
   }
