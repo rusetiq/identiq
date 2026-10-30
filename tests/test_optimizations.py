@@ -142,3 +142,44 @@ def test_repeated_confirmed_sightings_do_not_rewrite_the_database(setup,image):
     assert recognize(client,headers,image,sid,scanner).json['attendance']['status']=='present'
     assert len([sql for sql in statements if sql.startswith('UPDATE attendance_records')])==1
     assert len(attendance.detail(sid)['movements'])==1
+
+
+def test_active_session_id_lookup(tmp_path):
+    store=Store(tmp_path/'private'/'test.sqlite3')
+    attendance=Attendance(store)
+    store.save_profile({'name':'Student 1','student_id':'S1','grade':'10','section':'A','academic_year':'2025'})
+
+    assert attendance.active_session_id() is None
+
+    session_1=attendance.start('Session 1',class_name='10 A',academic_year='2025')
+    assert attendance.active_session_id()==session_1['id']
+
+    attendance.finish(session_1['id'])
+    assert attendance.active_session_id() is None
+
+    session_2=attendance.start('Session 2',class_name='10 A',academic_year='2025')
+    assert attendance.active_session_id()==session_2['id']
+
+
+def test_shared_camera_uses_active_session_id_without_full_directory_scan(tmp_path):
+    store=Store(tmp_path/'private'/'test.sqlite3')
+    attendance=Attendance(store)
+    from shared_camera import SharedCamera
+    shared=SharedCamera(attendance)
+
+    store.save_profile({'name':'Student 1','student_id':'S1','grade':'10','section':'A','academic_year':'2025'})
+    session=attendance.start('Session 1',class_name='10 A',academic_year='2025')
+
+    def unexpected_sessions():
+        pytest.fail('SharedCamera must not scan full attendance sessions history')
+
+    attendance.sessions=unexpected_sessions
+
+    client=shared.connect()
+    shared.command(client,{'type':'claim'})
+    jpeg=bytes.fromhex('ffd8ffe000104a46494600010101006000600000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffda0008010100003f00d2cf2000ffd9')
+    shared.publish(client,jpeg)
+    shared.command(client,{'type':'start'})
+    assert shared.running and shared.session_id==session['id']
+
+    shared.attendance_changed()
