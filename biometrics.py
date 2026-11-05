@@ -418,6 +418,9 @@ class Store:
                 db.execute("ALTER TABLE embeddings ADD COLUMN source TEXT NOT NULL DEFAULT 'laptop'")
             db.executescript("""
                 CREATE INDEX IF NOT EXISTS embeddings_person ON embeddings(person_id);
+                -- Performance optimization: covering index for profile reads (samples, compatible_samples, iphone_samples).
+                -- Avoids loading 2048-byte BLOB vectors from table storage when aggregating sample counts.
+                CREATE INDEX IF NOT EXISTS embeddings_person_stats ON embeddings(person_id, length(vector), source);
                 CREATE INDEX IF NOT EXISTS attendance_person_session ON attendance_records(person_id,session_id DESC);
                 CREATE TABLE IF NOT EXISTS identity_revision (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
                 INSERT OR IGNORE INTO identity_revision VALUES(1,0);
