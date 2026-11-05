@@ -33,6 +33,12 @@ class Attendance:
                 GROUP BY s.id ORDER BY s.id DESC
             """)]
 
+    def active_session_id(self):
+        """Fetch active session ID using indexed single-row lookup instead of full history JOIN."""
+        with self.store.connect() as db:
+            row = db.execute("SELECT id FROM attendance_sessions WHERE status='active'").fetchone()
+            return row['id'] if row else None
+
     def clear_all(self):
         """Remove attendance only; keep IDs monotonic and all enrollment/access data."""
         def purge(db):
