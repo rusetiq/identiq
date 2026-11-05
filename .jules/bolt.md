@@ -9,3 +9,7 @@
 ## 2026-10-27 - Use Indexed Single-Record Query for Profile Reads
 **Learning:** Returning updated records via `next(p for p in self.people() if p['id']==person_id)` executed a full database query joining all people and all embedding vector blobs, building $N$ Python dictionaries to find 1 record (~34.2 ms with 1,000 enrolled students). Querying `WHERE p.id=?` directly reduces latency by ~97% (~1.0 ms).
 **Action:** Always fetch specific identity records using `WHERE p.id=?` instead of calling directory-wide `people()` queries and filtering in Python memory.
+
+## 2026-11-04 - Index `session_id` on Attendance Records
+**Learning:** `attendance_records` only had an index on `(person_id, session_id DESC)`. Queries for session details and movement lookups (`WHERE r.session_id=?`) had to scan either the table or the entire composite index (`SCAN attendance_records USING INDEX attendance_person_session`). On 50,000 records across 100 sessions, adding an index on `attendance_records(session_id)` reduces session detail query time from 9.51 ms to 2.40 ms (~3.96x speedup) by converting the scan into a direct index search (`SEARCH attendance_records USING INDEX attendance_session`).
+**Action:** Ensure foreign-key fields queried in joins or filters (such as `session_id` on attendance records) have single-column or leading indexes when other indexes only lead with unrelated keys (e.g. `person_id`).

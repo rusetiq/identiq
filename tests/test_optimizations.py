@@ -142,3 +142,21 @@ def test_repeated_confirmed_sightings_do_not_rewrite_the_database(setup,image):
     assert recognize(client,headers,image,sid,scanner).json['attendance']['status']=='present'
     assert len([sql for sql in statements if sql.startswith('UPDATE attendance_records')])==1
     assert len(attendance.detail(sid)['movements'])==1
+
+
+def test_attendance_session_index_optimizes_detail_and_movement_queries(tmp_path):
+    store = Store(tmp_path / 'private' / 'test.sqlite3')
+    # Verify index existence in database schema
+    with store.connect() as db:
+        indexes = {row['name'] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert 'attendance_session' in indexes
+
+        # Verify EXPLAIN QUERY PLAN uses the attendance_session index
+        records_plan = [r[3] for r in db.execute(
+            'EXPLAIN QUERY PLAN SELECT * FROM attendance_records WHERE session_id=? ORDER BY name COLLATE NOCASE, id', (1,))]
+        assert any('attendance_session' in step for step in records_plan)
+
+        movements_plan = [r[3] for r in db.execute(
+            '''EXPLAIN QUERY PLAN SELECT m.*,r.name FROM attendance_movements m JOIN attendance_records r ON r.id=m.record_id
+            WHERE r.session_id=? ORDER BY m.id DESC LIMIT 200''', (1,))]
+        assert any('attendance_session' in step for step in movements_plan)
