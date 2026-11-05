@@ -447,6 +447,23 @@ class Store:
                 LEFT JOIN embeddings e ON p.id=e.person_id GROUP BY p.id ORDER BY p.id DESC
             """, (EMBEDDING_DIMENSION * 4,))]
 
+    def status_counts(self):
+        """Aggregate total people and profiles requiring re-enrollment in SQL.
+
+        Avoids loading all people, embedding metadata, and instantiating
+        thousands of Python dicts when serving the status polling endpoint.
+        """
+        with self.connect() as db:
+            row = db.execute("""
+                SELECT
+                    (SELECT count(*) FROM people),
+                    (SELECT count(DISTINCT person_id) FROM embeddings
+                     WHERE person_id NOT IN (
+                         SELECT person_id FROM embeddings WHERE length(vector) = ?
+                     ))
+            """, (EMBEDDING_DIMENSION * 4,)).fetchone()
+            return int(row[0]), int(row[1])
+
     def person(self, person_id):
         # Fetch a single person profile by primary key in O(1) time instead of
         # scanning all people and embeddings across the entire database.
