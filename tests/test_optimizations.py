@@ -8,6 +8,29 @@ from test_app import setup, vector, image, enroll
 from test_attendance import clock, recognize, start
 
 
+def test_status_counts_matches_full_directory_and_avoids_people_query(tmp_path):
+    store=Store(tmp_path/'private'/'test.sqlite3')
+    assert store.status_counts()==(0,0)
+    a=store.enroll('A',[vector()]*5)
+    b=store.enroll('B',[vector(2)]*5)
+    c=store.save_profile({'name':'C','person_type':'student','student_id':'S-3','grade':'7','section':'A','academic_year':'2026'})
+    # Incompatible legacy vector for B (128 floats = 512 bytes instead of 512 floats = 2048 bytes)
+    with store.connect() as db:
+        db.execute('DELETE FROM embeddings WHERE person_id=?',(b['id'],))
+        db.execute('INSERT INTO embeddings(person_id,vector,source) VALUES(?,?,?)',
+                   (b['id'],bytes(128*4),'legacy'))
+    profiles=store.people()
+    expected_people=len(profiles)
+    expected_reenroll=sum(p['samples']>0 and p['compatible_samples']==0 for p in profiles)
+    assert store.status_counts()==(expected_people,expected_reenroll)==(3,1)
+
+    # Confirm that status_counts does not call people()
+    def unexpected_directory_scan():
+        pytest.fail('status_counts must not scan the full directory via people()')
+    store.people=unexpected_directory_scan
+    assert store.status_counts()==(3,1)
+
+
 def test_single_profile_lookup_matches_directory_and_profile_writes(tmp_path):
     store=Store(tmp_path/'private'/'test.sqlite3')
     first=store.enroll('A',[vector()]*5)
