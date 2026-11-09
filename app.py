@@ -212,10 +212,12 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.get("/api/status")
     def status():
-        profiles = store.people()
-        return jsonify(models_ready=models_ready(), people=len(profiles), threshold=MATCH_THRESHOLD, samples=SAMPLES,
+        # Compute people count and re-enrollment required directly in SQL
+        # instead of loading the full directory and thousands of profile dicts.
+        people_count, reenrollment_required = store.status_counts()
+        return jsonify(models_ready=models_ready(), people=people_count, threshold=MATCH_THRESHOLD, samples=SAMPLES,
                        embedding_dimension=EMBEDDING_DIMENSION,
-                       reenrollment_required=sum(person['samples'] > 0 and person['compatible_samples'] == 0 for person in profiles),
+                       reenrollment_required=reenrollment_required,
                        attendance_confirmations=CONFIRMATIONS)
 
     @app.get('/api/client-context')
