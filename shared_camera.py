@@ -53,7 +53,8 @@ class SharedCamera:
 
     def command(self, client, message):
         kind=message.get('type')
-        active=next((s['id'] for s in self.attendance.sessions() if s['status']=='active'),None) if kind=='start' else None
+        # Use single-record indexed query for active session lookup
+        active=self.attendance.active_session_id() if kind=='start' else None
         with self.lock:
             self._expire()
             if client not in self.clients:raise FaceError('shared_missing','Reconnect to the shared camera.')
@@ -131,7 +132,8 @@ class SharedCamera:
         data.update(attendance_action=self.action,crossing_axis=self.axis,entry_direction=self.direction)
 
     def attendance_changed(self):
-        active=next((s['id'] for s in self.attendance.sessions() if s['status']=='active'),None)
+        # Use single-record indexed query for active session lookup
+        active=self.attendance.active_session_id()
         with self.lock:
             self.attendance_revision+=1
             if self.armed and self.session_id!=active:

@@ -8,6 +8,29 @@ from test_app import setup, vector, image, enroll
 from test_attendance import clock, recognize, start
 
 
+def test_status_counts_matches_full_directory_and_avoids_people_query(tmp_path):
+    store=Store(tmp_path/'private'/'test.sqlite3')
+    assert store.status_counts()==(0,0)
+    a=store.enroll('A',[vector()]*5)
+    b=store.enroll('B',[vector(2)]*5)
+    c=store.save_profile({'name':'C','person_type':'student','student_id':'S-3','grade':'7','section':'A','academic_year':'2026'})
+    # Incompatible legacy vector for B (128 floats = 512 bytes instead of 512 floats = 2048 bytes)
+    with store.connect() as db:
+        db.execute('DELETE FROM embeddings WHERE person_id=?',(b['id'],))
+        db.execute('INSERT INTO embeddings(person_id,vector,source) VALUES(?,?,?)',
+                   (b['id'],bytes(128*4),'legacy'))
+    profiles=store.people()
+    expected_people=len(profiles)
+    expected_reenroll=sum(p['samples']>0 and p['compatible_samples']==0 for p in profiles)
+    assert store.status_counts()==(expected_people,expected_reenroll)==(3,1)
+
+    # Confirm that status_counts does not call people()
+    def unexpected_directory_scan():
+        pytest.fail('status_counts must not scan the full directory via people()')
+    store.people=unexpected_directory_scan
+    assert store.status_counts()==(3,1)
+
+
 def test_single_profile_lookup_matches_directory_and_profile_writes(tmp_path):
     store=Store(tmp_path/'private'/'test.sqlite3')
     first=store.enroll('A',[vector()]*5)
@@ -142,3 +165,82 @@ def test_repeated_confirmed_sightings_do_not_rewrite_the_database(setup,image):
     assert recognize(client,headers,image,sid,scanner).json['attendance']['status']=='present'
     assert len([sql for sql in statements if sql.startswith('UPDATE attendance_records')])==1
     assert len(attendance.detail(sid)['movements'])==1
+
+
+def test_active_session_id_lookup(tmp_path):
+    store=Store(tmp_path/'private'/'test.sqlite3')
+    attendance=Attendance(store)
+    store.save_profile({'name':'Student 1','student_id':'S1','grade':'10','section':'A','academic_year':'2025'})
+
+    assert attendance.active_session_id() is None
+
+    session_1=attendance.start('Session 1',class_name='10 A',academic_year='2025')
+    assert attendance.active_session_id()==session_1['id']
+
+    attendance.finish(session_1['id'])
+    assert attendance.active_session_id() is None
+
+    session_2=attendance.start('Session 2',class_name='10 A',academic_year='2025')
+    assert attendance.active_session_id()==session_2['id']
+
+
+def test_shared_camera_uses_active_session_id_without_full_directory_scan(tmp_path):
+    store=Store(tmp_path/'private'/'test.sqlite3')
+    attendance=Attendance(store)
+    from shared_camera import SharedCamera
+    shared=SharedCamera(attendance)
+
+    store.save_profile({'name':'Student 1','student_id':'S1','grade':'10','section':'A','academic_year':'2025'})
+    session=attendance.start('Session 1',class_name='10 A',academic_year='2025')
+
+    def unexpected_sessions():
+        pytest.fail('SharedCamera must not scan full attendance sessions history')
+
+    attendance.sessions=unexpected_sessions
+
+    client=shared.connect()
+    shared.command(client,{'type':'claim'})
+    jpeg=bytes.fromhex('ffd8ffe000104a46494600010101006000600000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffda0008010100003f00d2cf2000ffd9')
+    shared.publish(client,jpeg)
+    shared.command(client,{'type':'start'})
+    assert shared.running and shared.session_id==session['id']
+
+    shared.attendance_changed()
+def test_student_history_query_uses_composite_index_without_temp_btree(tmp_path):
+    store = Store(tmp_path / 'private' / 'test.sqlite3')
+    person = store.save_profile({'name': 'Student', 'person_type': 'student', 'student_id': 'ADM-1', 'grade': '7', 'section': 'A', 'academic_year': '2026-2027'})
+    with store.connect() as db:
+        for i in range(1, 10):
+            db.execute("INSERT INTO attendance_sessions(id, name, status) VALUES(?, ?, 'closed')", (i, f'Session {i}'))
+            db.execute("INSERT INTO attendance_records(session_id, person_id, name, status) VALUES(?, ?, 'Student', 'present')", (i, person['id']))
+
+        plan = db.execute('''EXPLAIN QUERY PLAN SELECT s.name AS session_name,s.started_at,s.ended_at,s.status AS session_status,
+            r.id AS record_id,r.status,r.first_seen_at,r.last_seen_at,r.method,r.checked_in_at,r.checked_out_at,r.campus_state FROM attendance_records r
+            JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? ORDER BY r.session_id DESC LIMIT 100''', (person['id'],)).fetchall()
+        # Verify it uses the index directly and does NOT use a temporary B-tree filesort
+        plan_str = ' '.join(str(tuple(row)) for row in plan)
+        assert 'attendance_person_session' in plan_str
+        assert 'TEMP B-TREE' not in plan_str
+
+        # Compare outputs: ordering by r.session_id DESC produces the exact same result as ordering by s.id DESC
+        q_indexed = db.execute('''SELECT s.name AS session_name, r.id AS record_id FROM attendance_records r
+            JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? ORDER BY r.session_id DESC LIMIT 100''', (person['id'],)).fetchall()
+        q_unindexed = db.execute('''SELECT s.name AS session_name, r.id AS record_id FROM attendance_records r
+            JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? ORDER BY s.id DESC LIMIT 100''', (person['id'],)).fetchall()
+        assert [tuple(r) for r in q_indexed] == [tuple(r) for r in q_unindexed]
+def test_attendance_session_index_optimizes_detail_and_movement_queries(tmp_path):
+    store = Store(tmp_path / 'private' / 'test.sqlite3')
+    # Verify index existence in database schema
+    with store.connect() as db:
+        indexes = {row['name'] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert 'attendance_session' in indexes
+
+        # Verify EXPLAIN QUERY PLAN uses the attendance_session index
+        records_plan = [r[3] for r in db.execute(
+            'EXPLAIN QUERY PLAN SELECT * FROM attendance_records WHERE session_id=? ORDER BY name COLLATE NOCASE, id', (1,))]
+        assert any('attendance_session' in step for step in records_plan)
+
+        movements_plan = [r[3] for r in db.execute(
+            '''EXPLAIN QUERY PLAN SELECT m.*,r.name FROM attendance_movements m JOIN attendance_records r ON r.id=m.record_id
+            WHERE r.session_id=? ORDER BY m.id DESC LIMIT 200''', (1,))]
+        assert any('attendance_session' in step for step in movements_plan)
