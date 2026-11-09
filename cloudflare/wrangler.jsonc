@@ -1,0 +1,8 @@
+{
+  "name": "identiq-api",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-02",
+  "workers_dev": true,
+  "routes": [{"pattern": "identiq.rstq.tech", "custom_domain": true}],
+  "d1_databases": [{"binding": "DB", "database_name": "identiq-api", "database_id": "e687fe56-dd34-442f-a245-033a97796d30", "migrations_dir": "migrations"}]
+}

@@ -544,7 +544,7 @@ class Store:
         return self.candidates_batch([embedding], top_two=top_two)[0]
 
     def enroll(self, name, vectors, source="laptop", metadata=None, person_id=None):
-        # Serialize duplicate checking and insertion across concurrent enrollments.
+        # Serialize duplicate checking and insertion across concurrent enrollments
         with self.lock:
             centroid = normalize(np.mean(vectors, axis=0))
             pairwise = np.asarray(vectors) @ np.asarray(vectors).T

@@ -244,5 +244,3 @@ def merge_backup(store, path: Path):
         raise ValueError('The backup could not be merged. The server database was left unchanged.') from error
     finally:
         source.close()
-
-

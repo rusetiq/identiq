@@ -13,10 +13,23 @@
   <script defer src="{{ url_for('static', filename='app.js', v=build_version) }}"></script>
   <script defer src="{{ url_for('static', filename='parent-admin.js', v=build_version) }}"></script>
   <script defer src="/static/student-profiles.js?v={{ build_version }}"></script>
+  <script defer src="/static/cloud-admin.js?v={{ build_version }}"></script>
   <script defer src="/static/shared-camera.js?v={{ build_version }}"></script>
 <script defer src="/static/connection-check.js?v={{ build_version }}"></script></head>
 <body><p id="connection-status" class="connection-status" role="status" hidden></p>
 <main>
+  <section class="parent-management" aria-labelledby="cloud-title">
+    <h2 id="cloud-title">Cloud API</h2>
+    <p id="cloud-status" class="message" role="status">Checking cloud connection…</p>
+    <form id="cloud-key-form" class="parent-link-form">
+      <div><label for="cloud-key-name">Key name</label><input id="cloud-key-name" maxlength="80" placeholder="School integration" required></div>
+      <div><label for="cloud-key-source">School server ID</label><input id="cloud-key-source" maxlength="80" value="school-main" required></div>
+      <div><label for="cloud-key-scope">Access</label><select id="cloud-key-scope"><option value="read">Read attendance and profiles</option><option value="write">Read and request manual updates</option><option value="scanner">Connect this school server</option></select></div>
+      <button class="button button-primary">Create API key</button>
+    </form>
+    <p id="cloud-key-secret" class="message" role="status" hidden></p>
+    <div id="cloud-key-list"></div>
+  </section>
   <header><a href="/" class="brand">Identiq</a><nav class="header-links"><a href="/parents" class="text-button">Parent portal</a><button id="staff-account-settings" class="text-button">Staff login settings</button><button id="staff-logout" class="text-button">Staff sign out</button><span class="local"><span class="green-dot"></span> On this laptop</span></nav></header>
   <h1>School attendance</h1><p class="subtitle">Open the school day. Record arrivals and departures, and review who has checked in.</p>
   <div class="workspace">

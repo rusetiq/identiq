@@ -23,6 +23,7 @@ from parent_portal import PortalAccess
 from build_info import installed_build
 from web_assets import WebAssets
 from database_transfer import create_backup, merge_backup
+from cloud_sync import CloudSync
 
 import ssl
 
@@ -58,6 +59,8 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     store = Store(database or ROOT / "data" / "identities.sqlite3")
     attendance = Attendance(store)
     shared = SharedCamera(attendance)
+    cloud = CloudSync(store, attendance, shared.attendance_changed)
+    app.extensions['cloud_sync'] = cloud
     app.extensions["shared_camera"] = shared
     app.config["SOCK_SERVER_OPTIONS"]={"ping_interval":20,"max_message_size":400000}
     sock=Sock(app)
@@ -112,6 +115,15 @@ def create_app(database=None, engine=None, allowed_hosts=None):
                 return jsonify(error='Same-origin WebSocket required.',code='invalid_origin'),403
         public = request.path.startswith('/static/') or request.path == '/parents' or request.path in {
             '/api/parent/login', '/api/parent/logout', '/api/parent/attendance', '/api/staff/login', '/connection-check', '/network-certificate'}
+        # Machine-to-machine keys are scoped to the integration routes.
+        integration_key = os.environ.get('IDENTIQ_ATTENDANCE_API_KEY', '')
+        integration_write_key = os.environ.get('IDENTIQ_ATTENDANCE_WRITE_API_KEY', '')
+        authorization = request.headers.get('Authorization', '')
+        if request.path.startswith('/api/integration/attendance/'):
+            keys = (integration_key, integration_write_key) if request.method == 'GET' else (integration_write_key,)
+            if not any(key and secrets.compare_digest(authorization, 'Bearer ' + key) for key in keys):
+                return jsonify(error='Valid attendance API key required.', code='integration_unauthorized'), 401
+            return None
         if request.path.startswith('/api/parent/') or request.path == '/api/staff/login':
             if request.method == 'POST' and request.headers.get('X-Portal-Request') != '1':
                 return jsonify(error='Reload the sign-in page and try again.', code='invalid_portal_request'), 403
@@ -125,7 +137,20 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
     @app.after_request
     def headers(response):
-        if response.status_code<400 and request.method in {"POST","PATCH","DELETE"} and request.path.startswith("/api/attendance/"):
+        if response.status_code < 400 and request.method in {'POST', 'PATCH', 'DELETE'}:
+            if request.path == '/api/people' or request.path.startswith('/api/enroll') or request.path.endswith('/profile') or request.path.startswith(('/api/attendance/', '/api/integration/attendance/')):
+                if request.method == 'DELETE' and request.path.endswith('/attendance/sessions'):
+                    cloud.enqueue('clear_attendance', 'all', {})
+                else:
+                    cloud.snapshot()
+            elif request.method == 'DELETE' and request.path.startswith('/api/people/'):
+                cloud.enqueue('delete_people', request.path.rsplit('/', 1)[1], {})
+            elif request.path.startswith('/api/recognize'):
+                result = response.get_json(silent=True) or {}
+                observations = result.get('faces', [result])
+                if any((face.get('attendance') or {}).get('newly_moved') or (face.get('attendance') or {}).get('newly_present') for face in observations):
+                    cloud.snapshot()
+        if response.status_code<400 and request.method in {"POST","PATCH","DELETE"} and request.path.startswith(("/api/attendance/", "/api/integration/attendance/")):
             shared.attendance_changed()
         public_asset = (request.endpoint == 'static' and response.status_code in (200,304)
                         and assets.contains((request.view_args or {}).get('filename')))
@@ -221,6 +246,37 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     @app.get('/api/client-context')
     def client_context():
         return jsonify(token=token)
+
+    @app.get('/api/staff/cloud')
+    def cloud_status():
+        return jsonify(cloud.status())
+
+    @app.get('/api/staff/cloud/keys')
+    def cloud_keys():
+        try:
+            return jsonify(cloud.request('/admin/keys', admin=True))
+        except FaceError:
+            raise
+        except Exception:
+            return jsonify(error='Could not reach the cloud key manager.'), 502
+
+    @app.post('/api/staff/cloud/keys')
+    def create_cloud_key():
+        try:
+            return jsonify(cloud.create_key(payload())), 201
+        except FaceError:
+            raise
+        except Exception:
+            return jsonify(error='Cloud key creation failed. Check the key list before retrying.'), 502
+
+    @app.delete('/api/staff/cloud/keys/<uuid:key_id>')
+    def revoke_cloud_key(key_id):
+        try:
+            return jsonify(cloud.request('/admin/keys/'+str(key_id), 'DELETE', admin=True))
+        except FaceError:
+            raise
+        except Exception:
+            return jsonify(error='Could not revoke the cloud key.'), 502
 
     @app.post('/api/people')
     def register_person():
@@ -495,6 +551,23 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     @app.get("/api/attendance/sessions")
     def attendance_sessions():
         return jsonify(sessions=attendance.sessions())
+
+    @app.get('/api/integration/attendance/sessions')
+    def integration_attendance_sessions():
+        return jsonify(sessions=attendance.sessions())
+
+    @app.get('/api/integration/attendance/sessions/<int:session_id>')
+    def integration_attendance_detail(session_id):
+        return jsonify(session=attendance.detail(session_id))
+
+    @app.patch('/api/integration/attendance/sessions/<int:session_id>/records/<int:record_id>')
+    def integration_correct_attendance(session_id, record_id):
+        return jsonify(session=attendance.correct(session_id, record_id, payload().get('status')))
+
+    @app.post('/api/integration/attendance/sessions/<int:session_id>/records/<int:record_id>/movement')
+    def integration_manual_movement(session_id, record_id):
+        data = payload()
+        return jsonify(movement=attendance.manual_movement(session_id, record_id, data.get('action'), data.get('note')))
 
     @app.get('/api/attendance/overview')
     def attendance_overview():

@@ -101,6 +101,21 @@ Automatic direction tracking uses enrolled identities and normalized face center
 
 ## Run on the local network
 
+### Attendance integration API
+
+For the hosted Cloudflare API and admin-created keys, see [cloudflare/README.md](cloudflare/README.md). The routes below are the existing direct school-server API.
+
+An external service can access attendance using dedicated bearer keys. Before starting the network server, set `IDENTIQ_ATTENDANCE_API_KEY` for read access and `IDENTIQ_ATTENDANCE_WRITE_API_KEY` for read and write access. Use separate long, random secrets (for example, generate each using `python -c "import secrets; print(secrets.token_urlsafe(32))"`). Restart the server after changing them. Each permission is disabled when its variable is unset.
+
+Send `Authorization: Bearer YOUR_KEY` to the server's HTTPS address:
+
+- `GET /api/integration/attendance/sessions` lists sessions and summary counts.
+- `GET /api/integration/attendance/sessions/SESSION_ID` returns the session, roster, attendance status, and movement history.
+- `PATCH /api/integration/attendance/sessions/SESSION_ID/records/RECORD_ID` corrects a record with JSON such as `{"status":"present"}`. Valid values are `present`, `absent`, and `pending`; ended sessions cannot be set to pending.
+- `POST /api/integration/attendance/sessions/SESSION_ID/records/RECORD_ID/movement` records a manual movement with JSON such as `{"action":"check_in","note":"verified by staff"}`. Actions are `check_in` or `check_out`; check-out requires an existing check-in and the session must be active.
+
+For example: `curl --cacert data/tls/lan-YOUR-IP.crt -H "Authorization: Bearer YOUR_KEY" https://YOUR-IP:8443/api/integration/attendance/sessions`. Use the record `id` from the session roster, not the person's ID. These keys grant access to school attendance data; keep them private and transmit them only over trusted HTTPS. The integration does not expose face embeddings. It uses the existing configured network address and does not publish the server on the internet. Corrections and movements appear in the existing movement history as staff actions.
+
 Run `./run-network.sh` while the laptop is connected to Wi-Fi. It discovers the laptop’s Wi-Fi IPv4 address and serves HTTPS on port 8443, separately from the normal localhost server. To choose an address or port, use `./run-network.sh --address 192.168.1.20 --port 8443`. Only the selected private LAN interface is used; staff and parent authentication and same-origin request checks remain enabled.
 
 Open the printed staff URL or `/parents` on a device connected to the same network. The server creates a local certificate in `data/tls/lan-ADDRESS.crt`; trust that public certificate on each device before using the app or camera. Keep the `.key` file private on this laptop. No certificate trust settings are changed automatically. A new laptop IP generates a different certificate and URL. The laptop must remain awake, and Wi-Fi client isolation or a firewall can prevent connections from other devices. This command does not publish the app on the internet.
