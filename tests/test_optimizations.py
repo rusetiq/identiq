@@ -228,3 +228,19 @@ def test_student_history_query_uses_composite_index_without_temp_btree(tmp_path)
         q_unindexed = db.execute('''SELECT s.name AS session_name, r.id AS record_id FROM attendance_records r
             JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? ORDER BY s.id DESC LIMIT 100''', (person['id'],)).fetchall()
         assert [tuple(r) for r in q_indexed] == [tuple(r) for r in q_unindexed]
+def test_attendance_session_index_optimizes_detail_and_movement_queries(tmp_path):
+    store = Store(tmp_path / 'private' / 'test.sqlite3')
+    # Verify index existence in database schema
+    with store.connect() as db:
+        indexes = {row['name'] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert 'attendance_session' in indexes
+
+        # Verify EXPLAIN QUERY PLAN uses the attendance_session index
+        records_plan = [r[3] for r in db.execute(
+            'EXPLAIN QUERY PLAN SELECT * FROM attendance_records WHERE session_id=? ORDER BY name COLLATE NOCASE, id', (1,))]
+        assert any('attendance_session' in step for step in records_plan)
+
+        movements_plan = [r[3] for r in db.execute(
+            '''EXPLAIN QUERY PLAN SELECT m.*,r.name FROM attendance_movements m JOIN attendance_records r ON r.id=m.record_id
+            WHERE r.session_id=? ORDER BY m.id DESC LIMIT 200''', (1,))]
+        assert any('attendance_session' in step for step in movements_plan)
