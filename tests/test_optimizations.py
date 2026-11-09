@@ -183,3 +183,25 @@ def test_shared_camera_uses_active_session_id_without_full_directory_scan(tmp_pa
     assert shared.running and shared.session_id==session['id']
 
     shared.attendance_changed()
+def test_student_history_query_uses_composite_index_without_temp_btree(tmp_path):
+    store = Store(tmp_path / 'private' / 'test.sqlite3')
+    person = store.save_profile({'name': 'Student', 'person_type': 'student', 'student_id': 'ADM-1', 'grade': '7', 'section': 'A', 'academic_year': '2026-2027'})
+    with store.connect() as db:
+        for i in range(1, 10):
+            db.execute("INSERT INTO attendance_sessions(id, name, status) VALUES(?, ?, 'closed')", (i, f'Session {i}'))
+            db.execute("INSERT INTO attendance_records(session_id, person_id, name, status) VALUES(?, ?, 'Student', 'present')", (i, person['id']))
+
+        plan = db.execute('''EXPLAIN QUERY PLAN SELECT s.name AS session_name,s.started_at,s.ended_at,s.status AS session_status,
+            r.id AS record_id,r.status,r.first_seen_at,r.last_seen_at,r.method,r.checked_in_at,r.checked_out_at,r.campus_state FROM attendance_records r
+            JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? ORDER BY r.session_id DESC LIMIT 100''', (person['id'],)).fetchall()
+        # Verify it uses the index directly and does NOT use a temporary B-tree filesort
+        plan_str = ' '.join(str(tuple(row)) for row in plan)
+        assert 'attendance_person_session' in plan_str
+        assert 'TEMP B-TREE' not in plan_str
+
+        # Compare outputs: ordering by r.session_id DESC produces the exact same result as ordering by s.id DESC
+        q_indexed = db.execute('''SELECT s.name AS session_name, r.id AS record_id FROM attendance_records r
+            JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? ORDER BY r.session_id DESC LIMIT 100''', (person['id'],)).fetchall()
+        q_unindexed = db.execute('''SELECT s.name AS session_name, r.id AS record_id FROM attendance_records r
+            JOIN attendance_sessions s ON s.id=r.session_id WHERE r.person_id=? ORDER BY s.id DESC LIMIT 100''', (person['id'],)).fetchall()
+        assert [tuple(r) for r in q_indexed] == [tuple(r) for r in q_unindexed]
