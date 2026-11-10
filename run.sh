@@ -9,6 +9,6 @@ if ! .venv/bin/python -c 'import flask, cv2, numpy, onnxruntime, PIL, flask_sock
   .venv/bin/python -m pip install -r requirements.txt
 fi
 .venv/bin/python scripts/download_models.py
-echo "Identiq is available at http://localhost:${PORT:-8080}"
+echo "Identiq is available at http://localhost:${PORT:-8080}" 
 echo "Initial staff login: data/staff-login.json (keep this file private)"
 exec .venv/bin/python app.py
