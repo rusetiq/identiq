@@ -254,7 +254,9 @@ class FaceEngine:
             return {**details, 'status':'adjust', **quality_issue(quality)}, face
         # Keep resize before grayscale conversion: uint8 rounding changes sharpness
         # near the recognition and attendance cutoffs if these operations are swapped.
-        gray = cv2.cvtColor(cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+        if crop.shape[:2] != (128, 128):
+            crop = cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         brightness = float(gray.mean())
         quality["sharpness"] = round(sharpness, 1)
