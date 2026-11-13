@@ -1,11 +1,10 @@
 """One in-memory camera source, latest-frame delivery and authenticated staff controls."""
-import io
 import secrets
 import threading
 import time
 import uuid
-from PIL import Image, UnidentifiedImageError
-from biometrics import FaceError
+from PIL import Image
+from biometrics import FaceError, jpeg_dimensions
 
 
 class SharedCamera:
@@ -102,12 +101,11 @@ class SharedCamera:
             if not isinstance(frame,bytes) or not 4<=len(frame)<=350000:
                 raise FaceError('invalid_frame','Shared frame size is invalid.')
             try:
-                with Image.open(io.BytesIO(frame)) as image:
-                    if image.format!='JPEG' or not 1<=image.width<=1280 or not 1<=image.height<=1280:
-                        raise FaceError('invalid_frame','Send a small JPEG preview.')
-                    image.verify()
-            except (UnidentifiedImageError,OSError,ValueError) as error:
+                width, height = jpeg_dimensions(frame)
+            except (OSError, ValueError, Image.DecompressionBombError) as error:
                 raise FaceError('invalid_frame','Shared preview is not a valid JPEG.') from error
+            if not 1 <= width <= 1280 or not 1 <= height <= 1280:
+                raise FaceError('invalid_frame','Send a small JPEG preview.')
             self.frame=frame;self.frame_sequence+=1;self.frame_time=self.clock()
             if not self.ready:
                 self.ready=True;self.revision+=1

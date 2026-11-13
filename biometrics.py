@@ -50,6 +50,15 @@ def normalize(vector):
     return vector / norm
 
 
+def jpeg_dimensions(raw):
+    """Read the dimensions of a JPEG without decoding its pixels."""
+    with Image.open(io.BytesIO(raw), formats=('JPEG',)) as header:
+        if header.format != 'JPEG':
+            raise ValueError('Expected a JPEG camera frame.')
+        header.verify()
+        return header.size
+
+
 def decode_frame(value):
     if isinstance(value, (bytes, bytearray)):
         raw = bytes(value)
@@ -66,9 +75,9 @@ def decode_frame(value):
         raise FaceError("invalid_image", "Camera frame is too large.")
     try:
         # Read JPEG dimensions before decoding to bound decompression memory.
-        with Image.open(io.BytesIO(raw)) as header:
-            if header.format != "JPEG" or min(header.size) < 80 or max(header.size) > 1920:
-                raise FaceError("invalid_image", "Frame dimensions must be between 80 and 1920 pixels.")
+        width, height = jpeg_dimensions(raw)
+        if min(width, height) < 80 or max(width, height) > 1920:
+            raise FaceError("invalid_image", "Frame dimensions must be between 80 and 1920 pixels.")
         frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             raise ValueError()
