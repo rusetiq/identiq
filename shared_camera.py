@@ -3,6 +3,7 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from PIL import Image
 from biometrics import FaceError, jpeg_dimensions
 
@@ -52,9 +53,10 @@ class SharedCamera:
 
     def command(self, client, message):
         kind=message.get('type')
-        # Use single-record indexed query for active session lookup
-        active=self.attendance.active_session_id() if kind=='start' else None
-        with self.lock:
+        # Use the same lock order as scan writes so a session cannot finish
+        # between selecting it and arming its scanner.
+        session_lock = self.attendance.store.lock if kind == 'start' else nullcontext()
+        with session_lock, self.lock:
             self._expire()
             if client not in self.clients:raise FaceError('shared_missing','Reconnect to the shared camera.')
             if kind=='claim':
@@ -77,6 +79,7 @@ class SharedCamera:
                 self.lease=None;self._release()
             elif kind=='start':
                 if not self.source or not self.ready:raise FaceError('source_missing','Enable and share a camera from the laptop first.')
+                active = self.attendance.active_session_id()
                 if active is None:raise FaceError('session_missing','Start an attendance session first.')
                 if message.get('session_id') is not None and message['session_id']!=active:
                     raise FaceError('session_closed','The previous attendance session has ended.')
@@ -130,9 +133,8 @@ class SharedCamera:
         data.update(attendance_action=self.action,crossing_axis=self.axis,entry_direction=self.direction)
 
     def attendance_changed(self):
-        # Use single-record indexed query for active session lookup
-        active=self.attendance.active_session_id()
-        with self.lock:
+        with self.attendance.store.lock, self.lock:
+            active = self.attendance.active_session_id()
             self.attendance_revision+=1
             if self.armed and self.session_id!=active:
                 self.running=self.armed=False;self.epoch+=1;self.revision+=1
