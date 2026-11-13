@@ -258,7 +258,7 @@ class FaceEngine:
             crop = cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA)
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        brightness = float(gray.mean())
+        brightness = cv2.mean(gray)[0]
         quality["sharpness"] = round(sharpness, 1)
         quality["brightness"] = round(brightness, 1)
         if sharpness < 6:
