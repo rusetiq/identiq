@@ -113,7 +113,7 @@ test('offline recovery discards expired and legacy frames instead of replaying t
     window:{IdentiqOfflineAttendance:{entries:async()=>items,remove:async ids=>removed.push(...ids)}},
     apiFrame:async(path,payload)=>sent.push(payload),refreshOfflineQueue:async()=>{},refreshAttendance:async()=>{},toast(){},transientError:()=>false});
   const source=fs.readFileSync('static/app.js','utf8');
-  vm.runInContext(source.slice(source.indexOf('async function syncOfflineAttendance('),source.indexOf('let refreshingToken=')),context);
+  vm.runInContext(source.slice(source.indexOf('async function syncOfflineAttendance('),source.indexOf('let refreshingToken')),context);
   await context.syncOfflineAttendance();
   assert.deepEqual(removed,[1,2,3]);
   assert.equal(sent.length,1);
