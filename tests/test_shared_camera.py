@@ -86,3 +86,22 @@ def test_malformed_frames_commands_and_websocket_auth(setup,image):
     parent=parent_client(client,link(client,headers,person['id']).json['parent']['login_id'])
     assert parent.get('/api/shared/ws',headers={'Origin':'http://localhost'}).status_code==401
     assert not room.running
+
+
+@pytest.mark.parametrize('expired', [False, True])
+def test_reclaim_does_not_rearm_a_finished_session(setup, image, expired):
+    _, _, sid, room, clock, source, viewer, jpeg = room_fixture(setup, image)
+    room.command(source, {'type': 'claim'})
+    room.publish(source, jpeg)
+    room.command(viewer, {'type': 'start'})
+    key = room.snapshot(source)['source_key']
+    room.disconnect(source)
+
+    # Finish the session before the camera receives the attendance update.
+    room.attendance.finish(sid)
+    if expired:
+        clock[0] += 31
+    room.command(viewer, {'type': 'claim', 'resume_key': key})
+    room.publish(viewer, jpeg)
+    assert room.ready and room.resumed
+    assert not room.running and not room.armed

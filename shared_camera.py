@@ -55,7 +55,7 @@ class SharedCamera:
         kind=message.get('type')
         # Use the same lock order as scan writes so a session cannot finish
         # between selecting it and arming its scanner.
-        session_lock = self.attendance.store.lock if kind == 'start' else nullcontext()
+        session_lock = self.attendance.store.lock if kind in ('start', 'claim') else nullcontext()
         with session_lock, self.lock:
             self._expire()
             if client not in self.clients:raise FaceError('shared_missing','Reconnect to the shared camera.')
@@ -72,7 +72,10 @@ class SharedCamera:
                     self.resumed=bool(lease)
                     self.retired_lease=None
                     if lease:
-                        self.armed=lease['armed'];self.session_id=lease['session_id'];self.lease=None
+                        self.session_id = lease['session_id']
+                        self.armed = (lease['armed'] and self.session_id is not None
+                                      and self.session_id == self.attendance.active_session_id())
+                        self.lease = None
                     else:self.action,self.axis,self.direction=options
             elif kind=='release':
                 if client!=self.source:raise FaceError('source_required','Only the camera source can stop sharing.')
