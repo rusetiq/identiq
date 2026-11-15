@@ -79,9 +79,35 @@ def test_parallel_inference_propagates_errors_without_returning_partial_matches(
         detector._embedding_pool=pool
         with pytest.raises(FaceError,match='Cannot read this face'):
             detector.extract_group(smooth_image())
-        assert not detector.lock.locked()
+        assert not detector._detector_lock.locked()
         detector.recognizer=Recognizer()
         assert detector.extract_group(smooth_image())['ready_count']==2
+
+
+def test_preview_can_detect_while_group_embeddings_are_running():
+    detector = group_engine()
+    picture = smooth_image()
+    embedding_started = threading.Event()
+    resume = threading.Event()
+
+    class SlowRecognizer(Recognizer):
+        def feature(self, x):
+            embedding_started.set()
+            assert resume.wait(5), 'Timed out waiting for preview'
+            return super().feature(x)
+
+    detector.recognizer = SlowRecognizer()
+    with ThreadPoolExecutor(max_workers=2) as embeddings, ThreadPoolExecutor(max_workers=2) as requests:
+        detector._embedding_pool = embeddings
+        recognition = requests.submit(detector.extract_group, picture)
+        try:
+            assert embedding_started.wait(2)
+            preview = requests.submit(detector.analyze_group, picture)
+            assert preview.result(timeout=2)['face_count'] == 2
+            assert not recognition.done()
+        finally:
+            resume.set()
+        assert recognition.result(timeout=2)['ready_count'] == 2
 
 
 @pytest.mark.parametrize('reason',['small','detection'])
@@ -268,3 +294,54 @@ def test_twenty_identities_require_fresh_confirmations_before_checking_in(setup,
     assert attendance['counts']['present']==20 and len(attendance['movements'])==20
     html=client.get('/').text
     assert 'data-max-faces="20"' in html and 'Up to 20 faces together' in html
+
+
+def test_three_buffered_frames_run_concurrently_and_confirm_in_capture_order(setup, image):
+    client, headers, detector, _ = setup
+    enroll(client, headers, image)
+    session_id = start(client, headers).json['session']['id']
+    moment = clock(client)
+    moment[0] = 101
+    ages = [650, 320, 20]
+    barrier = threading.Barrier(3)
+    newer_ready = threading.Event()
+
+    def extract(frame):
+        marker = int(frame[0, 0, 0])
+        barrier.wait(timeout=3)
+        if marker == 30:
+            assert newer_ready.wait(3)
+        if marker == 150:
+            newer_ready.set()
+        return response_faces([detector.vector]) | {'message': str(marker)}
+
+    detector.extract_group = extract
+    multipart = {'payload': json.dumps({
+        'attendance_session_id': session_id, 'scanner_id': str(uuid.uuid4()), 'capture_ages_ms': ages,
+    }), 'image': []}
+    for marker in (30, 90, 150):
+        ok, encoded = cv2.imencode('.jpg', np.full((100, 100, 3), marker, dtype=np.uint8))
+        assert ok
+        multipart['image'].append((io.BytesIO(encoded.tobytes()), 'frame.jpg'))
+    response = client.post('/api/recognize/group', headers=headers, data=multipart)
+    assert response.status_code == 200
+    scans = response.json['scans']
+    assert [scan['message'] for scan in scans] == ['30', '90', '150']
+    updates = [scan['faces'][0]['attendance'] for scan in scans]
+    assert [update['confirmations'] for update in updates] == [1, 2, 3]
+    assert [update['newly_present'] for update in updates] == [False, False, True]
+    attendance = client.application.extensions['attendance']
+    assert len(attendance.detail(session_id)['movements']) == 1
+
+
+@pytest.mark.parametrize('ages', [[0, 320, 650], [650, 650, 0], [1600, 320, 0], [650, 0]])
+def test_group_batch_rejects_bad_capture_order_or_age(setup, image, ages):
+    client, headers, detector, _ = setup
+    enroll(client, headers, image)
+    session_id = start(client, headers).json['session']['id']
+    detector.extract_group = lambda frame: pytest.fail('Invalid batches should not run inference')
+    response = client.post('/api/recognize/group', headers=headers, json={
+        'attendance_session_id': session_id, 'scanner_id': str(uuid.uuid4()),
+        'images': [image] * 3, 'capture_ages_ms': ages,
+    })
+    assert response.json['code'] == 'invalid_request'

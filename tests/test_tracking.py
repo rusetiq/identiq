@@ -16,7 +16,8 @@ class Detector:
 
 def engine(faces):
     result = FaceEngine.__new__(FaceEngine)
-    result.lock = threading.Lock()
+    result._detector_lock = threading.Lock()
+    result._embedding_slots = threading.BoundedSemaphore(2)
     result.detector = Detector(faces)
     return result
 

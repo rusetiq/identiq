@@ -135,7 +135,7 @@ def _recognizer_for_device(model_path, cache_root):
 
 class FaceEngine:
     def __init__(self, model_dir):
-        self.lock = threading.Lock()
+        self._detector_lock = threading.Lock()
         self.detector = cv2.FaceDetectorYN.create(
             str(model_dir / "face_detection_yunet_2023mar.onnx"), "", (640, 480), 0.75, 0.3, max(80, MAX_FACES * 4))
         model_path = model_dir / "arcface_w600k_r50.onnx"
@@ -150,6 +150,7 @@ class FaceEngine:
         self._embedding_cache = OrderedDict()
         self._embedding_cache_lock = threading.Lock()
         self.embedding_workers = min(4, os.cpu_count() or 1)
+        self._embedding_slots = threading.BoundedSemaphore(3)
         self._embedding_pool = ThreadPoolExecutor(max_workers=self.embedding_workers,
                                                   thread_name_prefix='face-embedding')
 
@@ -208,11 +209,14 @@ class FaceEngine:
         height, width = image.shape[:2]
         scale = min(1.0, max_side / max(width, height))
         detector_image = cv2.resize(image, (round(width * scale), round(height * scale))) if scale < 1 else image
-        self.detector.setInputSize((detector_image.shape[1], detector_image.shape[0]))
-        _, faces = self.detector.detect(detector_image)
-        if faces is None:
-            return np.empty((0, 15), dtype=np.float32)
-        faces = faces.copy()
+        # YuNet stores the input size on the detector. Keep sizing and
+        # detection together, then release it before quality checks or ArcFace.
+        with self._detector_lock:
+            self.detector.setInputSize((detector_image.shape[1], detector_image.shape[0]))
+            _, faces = self.detector.detect(detector_image)
+            if faces is None:
+                return np.empty((0, 15), dtype=np.float32)
+            faces = faces.copy()
         faces[:, :14] /= scale
         return faces
 
@@ -302,52 +306,51 @@ class FaceEngine:
             if extract and analysis['status'] == 'ready':
                 ready_faces.append((analysis, face))
             faces.append(analysis)
-        pool = getattr(self, '_embedding_pool', None)
-        if pool is not None and len(ready_faces) > 1:
-            futures = [pool.submit(self._arcface_embedding, image, face) for _, face in ready_faces]
-            try:
-                # Preserve detection order even when a later face finishes first.
-                for (analysis, _), future in zip(ready_faces, futures):
-                    analysis['embedding'] = future.result()
-            finally:
-                # Finish this frame's jobs before releasing the engine lock,
-                # including when one face fails alignment or inference.
-                wait(futures)
-        else:
-            for analysis, face in ready_faces:
-                analysis['embedding'] = self._arcface_embedding(image, face)
+        embeddings = self._embed_faces(image, [face for _, face in ready_faces])
+        for (analysis, _), embedding in zip(ready_faces, embeddings):
+            analysis['embedding'] = embedding
         ready = sum(face['status'] == 'ready' for face in faces)
         return {"status": "ready" if ready else "adjust", "face_count": len(faces), "ready_count": ready, "faces": faces,
                 "code": None if ready else "no_face" if not faces else "quality",
                 "message": f"{len(faces)} faces detected · {ready} ready to recognize." if faces else "No faces detected. Look toward the camera."}
 
+    def _embed_faces(self, image, faces):
+        if not faces:
+            return []
+        pool = getattr(self, '_embedding_pool', None)
+        if pool is None:
+            return [self._arcface_embedding(image, face) for face in faces]
+        # Bound outstanding work across requests as well as the worker count.
+        # Single-face requests use the same pool as groups.
+        with self._embedding_slots:
+            futures = [pool.submit(self._arcface_embedding, image, face) for face in faces]
+            try:
+                return [future.result() for future in futures]
+            finally:
+                # Keep the batch slot until all its jobs finish, even on error.
+                wait(futures)
+
     def analyze_group(self, image):
-        with self.lock:
-            return self._group(image)
+        return self._group(image)
 
     def extract_group(self, image):
-        with self.lock:
-            return self._group(image, extract=True)
+        return self._group(image, extract=True)
 
     def extract_attendance_group(self, image):
-        with self.lock:
-            return self._group(image, extract=True, attendance=True)
+        return self._group(image, extract=True, attendance=True)
 
     def analyze(self, image):
-        with self.lock:
-            return self._analyze(image)[0]
+        return self._analyze(image)[0]
 
     def extract(self, image):
         embedding, analysis = self.extract_with_quality(image)
         return embedding, analysis['box']
 
     def extract_with_quality(self, image, attendance=False):
-        with self.lock:
-            analysis, face = self._analyze(image, attendance=attendance)
-            if analysis["status"] != "ready":
-                raise FaceError(analysis["code"], analysis["message"])
-            embedding = self._arcface_embedding(image, face)
-            return embedding, analysis
+        analysis, face = self._analyze(image, attendance=attendance)
+        if analysis["status"] != "ready":
+            raise FaceError(analysis["code"], analysis["message"])
+        return self._embed_faces(image, [face])[0], analysis
 
 
 class Store:

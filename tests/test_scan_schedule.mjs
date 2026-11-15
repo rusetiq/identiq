@@ -87,3 +87,14 @@ test('distant and uncertain faces are retried promptly without slowing confirmat
   assert.equal(scan.delay({face_count:1,faces:[{status:'unknown'}],retry_after_ms:500},true),100);
   assert.equal(scan.delay({face_count:1,faces:[{status:'matched'}],retry_after_ms:351,processing_ms:0},true),351);
 });
+
+test('confirmation pacing subtracts full time since capture and chooses the earliest provisional face',()=>{
+  const scan=scheduling();
+  const data={face_count:3,processing_ms:50,retry_after_ms:250,faces:[
+    {status:'matched',attendance:{status:'present',retry_after_ms:250}},
+    {status:'matched',attendance:{status:'confirming',retry_after_ms:350}},
+    {status:'matched',attendance:{status:'confirming',retry_after_ms:400}},
+  ]};
+  assert.equal(scan.delay(data,true,200),160);
+  assert.equal(scan.delay(data,true,450),0);
+});

@@ -41,6 +41,18 @@ async function saveOfflineAttendance(payload) {
   if (!window.IdentiqOfflineAttendance || Date.now() - lastOfflineCaptureAt < 1000) return false;
   lastOfflineCaptureAt = Date.now();
   try {
+    if (payload.image instanceof Blob) {
+      const started = performance.now();
+      const image = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(payload.image);
+      });
+      const capture_age_ms = payload.capture_age_ms + performance.now() - started;
+      if (capture_age_ms > 1500) return false;
+      payload = { ...payload, image, capture_age_ms };
+    }
     offlineQueueCount = await window.IdentiqOfflineAttendance.add(payload); renderConnectionStatus();
     return true;
   } catch (error) { return false; }
@@ -78,10 +90,19 @@ function expiredSession() {
   if (signingOut) return; signingOut = true; window.sharedRoom?.shutdown(); stopCamera(); window.location.assign('/?expired=1');
 }
 function compactFrameForm(data) {
-  const { image, ...metadata } = data;
-  const encoded = image.slice(image.indexOf(',') + 1), raw = atob(encoded), bytes = new Uint8Array(raw.length);
-  for (let index = 0; index < raw.length; index++)bytes[index] = raw.charCodeAt(index);
-  const form = new FormData(); form.append('payload', JSON.stringify(metadata)); form.append('image', new Blob([bytes], { type: 'image/jpeg' }), 'frame.jpg');
+  const { image, images, ...metadata } = data;
+  const form = new FormData();
+  form.append('payload', JSON.stringify(metadata));
+  for (const frame of images || [image]) {
+    if (frame instanceof Blob) {
+      form.append('image', frame, 'frame.jpg');
+      continue;
+    }
+    const raw = atob(frame.slice(frame.indexOf(',') + 1));
+    const bytes = new Uint8Array(raw.length);
+    for (let index = 0; index < raw.length; index++) bytes[index] = raw.charCodeAt(index);
+    form.append('image', new Blob([bytes], { type: 'image/jpeg' }), 'frame.jpg');
+  }
   return form;
 }
 function apiFrame(path, data, signal) { return api(path, 'POST', data, signal, false, true); }
@@ -160,13 +181,16 @@ function drawBox(box, matched, name) {
   showCameraNames(name ? [{ name, detail: matched ? "Verified" : "Confirming match", matched }] : []);
 }
 
-function frame(canvas = captureCanvas, maxSide = 960, jpegQuality = .86) {
+function frame(canvas = captureCanvas, maxSide = 960, jpegQuality = .86, binary = false) {
   const video = $("video");
   if (!state.stream || !video.videoWidth || video.readyState < 2) throw new Error("The camera is not ready yet.");
   const ratio = Math.min(1, maxSide / video.videoWidth, maxSide / video.videoHeight);
   const width = Math.round(video.videoWidth * ratio), height = Math.round(video.videoHeight * ratio);
   if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
   canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+  if (binary && typeof canvas.toBlob === 'function') {
+    return new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", jpegQuality));
+  }
   const image = canvas.toDataURL("image/jpeg", jpegQuality);
   return image.length > 1900000 ? canvas.toDataURL("image/jpeg", .70) : image;
 }
@@ -322,23 +346,34 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
   let failures = 0;
   const attendancePayload = (image, captureAgeMs) => ({ image, capture_age_ms: captureAgeMs, person_id: null, ...sharedContext, attendance_session_id: attendanceSessionId, scanner_id: scannerId, attendance_action: state.movementMode, crossing_axis: $("crossing-axis").value, entry_direction: $("entry-direction").value });
   // Retain camera detail for smaller faces; frame() never upscales the source.
-  const recognitionFrame = () => frame(captureCanvas, 1920, .78);
+  const recognitionFrame = () => frame(captureCanvas, 1920, .78, !!attendanceSessionId);
   // Capture while inference runs so a walking person can still be confirmed.
   // Keep a small, chronological, in-memory buffer and discard old images.
   const pendingFrames = window.IdentiqScan.faceBuffer(); let lastCapturedAt = -Infinity;
   const captureFresh = () => { const capturedAt = performance.now(), image = recognitionFrame(); lastCapturedAt = capturedAt; return { image, capturedAt }; };
-  const bufferTimer = attendanceSessionId ? setInterval(() => {
-    if (!state.scanning || generation !== state.generation || !state.stream || connectionIssues.has('api')) return;
+  let bufferEncoding = false;
+  const captureIntervalMs = state.attendanceCaptureIntervalMs || 300;
+  const bufferTimer = attendanceSessionId ? setInterval(async () => {
+    if (bufferEncoding || !state.scanning || generation !== state.generation || !state.stream || connectionIssues.has('api')) return;
     const now = performance.now();
-    if (now - lastCapturedAt < 280) return;
+    if (now - lastCapturedAt < captureIntervalMs - 15) return;
     try {
       const captured = captureFresh();
       pendingFrames.push(captured);
+      if (captured.image instanceof Promise) {
+        bufferEncoding = true;
+        await captured.image;
+      }
     } catch (error) { }
-  }, 300) : null;
-  const offlineTimer = attendanceSessionId && !sharedExecution ? setInterval(() => {
+    finally { bufferEncoding = false; }
+  }, captureIntervalMs) : null;
+  const offlineTimer = attendanceSessionId && !sharedExecution ? setInterval(async () => {
     if (!connectionIssues.has('api')) return;
-    try { const captured = captureFresh(); saveOfflineAttendance(attendancePayload(captured.image, Math.max(0, performance.now() - captured.capturedAt))); } catch (error) { }
+    try {
+      const captured = captureFresh();
+      const image = await captured.image;
+      if (image && generation === state.generation) await saveOfflineAttendance(attendancePayload(image, Math.max(0, performance.now() - captured.capturedAt)));
+    } catch (error) { }
   }, 1000) : null;
   $("recognize").textContent = "Pause recognition";
   if (attendanceSessionId) $("attendance-scan").textContent = "Pause attendance scan";
@@ -354,19 +389,46 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
         let captured;
         if (attendanceSessionId) captured = pendingFrames.take(performance.now());
         if (!captured) { pendingFrames.clear(); captured = captureFresh(); }
-        capturedAt = captured.capturedAt; const image = captured.image;
-        const requestStarted = performance.now();
-        recognitionPayload = attendanceSessionId ? attendancePayload(image, Math.max(0, performance.now() - capturedAt)) : { image, person_id: selected ? Number(selected) : null };
-        const data = await apiFrame(group ? "/api/recognize/group" : "/api/recognize", recognitionPayload, scanAbort.signal);
+        capturedAt = captured.capturedAt;
+        const dequeueAt = performance.now();
+        const captures = [captured];
+        if (attendanceSessionId) {
+          while (captures.length < 3) {
+            const next = pendingFrames.take(dequeueAt);
+            if (!next) break;
+            captures.push(next);
+          }
+        }
+        const images = await Promise.all(captures.map(frame => frame.image));
         if (!state.scanning || generation !== state.generation) break;
+        if (images.some(image => !image)) throw Object.assign(new Error('The camera could not capture a frame.'), { code: 'quality' });
+        const image = images[0];
+        const requestStarted = performance.now();
+        const captureAge = frame => Math.max(0, requestStarted - frame.capturedAt);
+        recognitionPayload = attendanceSessionId ? attendancePayload(image, captureAge(captured)) : { image, person_id: selected ? Number(selected) : null };
+        let upload = recognitionPayload;
+        if (captures.length > 1) {
+          const { image, capture_age_ms, ...metadata } = recognitionPayload;
+          upload = { ...metadata, images, capture_ages_ms: captures.map(captureAge) };
+        }
+        const response = await apiFrame(group ? "/api/recognize/group" : "/api/recognize", upload, scanAbort.signal);
+        if (!state.scanning || generation !== state.generation) break;
+        const scans = response.scans || [response];
+        const data = scans.at(-1);
         window.IdentiqScan?.record(data, performance.now() - requestStarted);
-        nextScanDelay = window.IdentiqScan?.delay(data, !!attendanceSessionId) ?? nextScanDelay;
+        nextScanDelay = window.IdentiqScan?.delay(data, !!attendanceSessionId, performance.now() - captures.at(-1).capturedAt) ?? nextScanDelay;
         state.matchThreshold = data.threshold;
         failures = 0;
         if (group) {
-          liveTracker.accept(data, image, capturedAt); await showGroupResults(data, groupStreaks, attendanceSessionId);
+          for (const [index, scan] of scans.entries()) {
+            if (!state.scanning || generation !== state.generation) break;
+            const frame = captures[index];
+            liveTracker.accept(scan, images[index], frame.capturedAt);
+            await showGroupResults(scan, groupStreaks, attendanceSessionId);
+          }
+          if (!state.scanning || generation !== state.generation) break;
           if (attendanceSessionId) pendingFrames.accept(data.faces, performance.now());
-          const delay = !!attendanceSessionId && pendingFrames.has(performance.now()) ? 0 : window.IdentiqScan?.delay(data, !!attendanceSessionId) ?? (attendanceSessionId ? (data.face_count ? 250 : 600) : 650);
+          const delay = attendanceSessionId && pendingFrames.has(performance.now()) ? 0 : nextScanDelay;
           if (delay) await sleep(delay);
           continue;
         }
@@ -608,6 +670,7 @@ async function initializeApp() {
   await refreshOfflineQueue();
   try {
     const status = await api("/api/status"); state.ready = status.models_ready;
+    state.attendanceCaptureIntervalMs = status.attendance_capture_interval_ms;
     await refreshPeople();
     await refreshAttendance();
     if (!state.ready) { toast("Face models are missing. Run python scripts/download_models.py."); result("Setup needed", "Download the face models, then reload this page.", "warning"); }

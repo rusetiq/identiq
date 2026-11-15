@@ -1,6 +1,7 @@
 import json
 import hashlib
 import logging
+from concurrent.futures import ThreadPoolExecutor, wait
 import os
 from pathlib import Path
 import secrets
@@ -16,7 +17,7 @@ from simple_websocket import ConnectionClosed
 from shared_camera import SharedCamera
 
 from biometrics import EMBEDDING_DIMENSION, FaceEngine, FaceError, MAX_FACES, SAMPLES, Store, decode_frame, identify, identify_candidates
-from attendance_policy import MATCH_THRESHOLD, CONFIRMATIONS
+from attendance_policy import MATCH_THRESHOLD, CONFIRMATIONS, MAX_BUFFER_AGE
 from iphone import valid_name, validate_capture
 from attendance import Attendance
 from parent_portal import PortalAccess
@@ -48,7 +49,7 @@ class _QuietDisconnectFilter(logging.Filter):
 logging.getLogger("werkzeug").addFilter(_QuietDisconnectFilter())
 
 
-def create_app(database=None, engine=None, allowed_hosts=None):
+def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmation=False):
     app = Flask(__name__)
     running_build=installed_build()
     assets = WebAssets(ROOT/'static',running_build)
@@ -57,7 +58,7 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     app.config["MAX_CONTENT_LENGTH"] = 128 * 1024 * 1024
     token = secrets.token_urlsafe(32)
     store = Store(database or ROOT / "data" / "identities.sqlite3")
-    attendance = Attendance(store)
+    attendance = Attendance(store, fast_confirmation=fast_confirmation)
     shared = SharedCamera(attendance)
     cloud = CloudSync(store, attendance, shared.attendance_changed)
     app.extensions['cloud_sync'] = cloud
@@ -73,6 +74,8 @@ def create_app(database=None, engine=None, allowed_hosts=None):
     app.extensions["portal_access"] = access
     app.extensions["attendance"] = attendance
     engine_lock = threading.Lock()
+    frame_workers = ThreadPoolExecutor(max_workers=3, thread_name_prefix='scan-frame')
+    batch_lock = threading.Lock()
 
     def get_engine():
         nonlocal engine
@@ -147,7 +150,8 @@ def create_app(database=None, engine=None, allowed_hosts=None):
                 cloud.enqueue('delete_people', request.path.rsplit('/', 1)[1], {})
             elif request.path.startswith('/api/recognize'):
                 result = response.get_json(silent=True) or {}
-                observations = result.get('faces', [result])
+                observations = [face for scan in result.get('scans', [result])
+                                for face in scan.get('faces', [scan])]
                 if any((face.get('attendance') or {}).get('newly_moved') or (face.get('attendance') or {}).get('newly_present') for face in observations):
                     cloud.snapshot()
         if response.status_code<400 and request.method in {"POST","PATCH","DELETE"} and request.path.startswith(("/api/attendance/", "/api/integration/attendance/")):
@@ -243,7 +247,8 @@ def create_app(database=None, engine=None, allowed_hosts=None):
         return jsonify(models_ready=models_ready(), people=people_count, threshold=MATCH_THRESHOLD, samples=SAMPLES,
                        embedding_dimension=EMBEDDING_DIMENSION,
                        reenrollment_required=reenrollment_required,
-                       attendance_confirmations=CONFIRMATIONS)
+                       attendance_confirmations=CONFIRMATIONS,
+                       attendance_capture_interval_ms=attendance.capture_interval_ms)
 
     @app.get('/api/client-context')
     def client_context():
@@ -301,21 +306,26 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             raise FaceError("invalid_request", "Send a JSON object.")
         return data
 
-    def frame_payload():
+    def frame_payload(*, batch=False):
         """Accept compact multipart camera frames while retaining JSON clients."""
         if request.mimetype == 'multipart/form-data':
             try:
                 data=json.loads(request.form.get('payload','{}'))
             except json.JSONDecodeError as error:
                 raise FaceError('invalid_request','Send valid frame metadata.') from error
-            image=request.files.get('image')
-            if not isinstance(data,dict) or image is None:
-                raise FaceError('invalid_request','Send frame metadata and a JPEG image.')
-            data['image']=image.read()
+            images = request.files.getlist('image')
+            if not isinstance(data, dict) or not images or len(images) > (3 if batch else 1):
+                raise FaceError('invalid_request', 'Send frame metadata and JPEG images.')
+            if batch and 'capture_ages_ms' in data:
+                data['images'] = [image.read(2_000_001) for image in images]
+            elif len(images) == 1:
+                data['image'] = images[0].read(2_000_001)
+            else:
+                raise FaceError('invalid_request', 'Send a capture age for each frame.')
             return data
         return payload()
 
-    def frame_fingerprint(value, frame):
+    def frame_fingerprint(frame):
         # Hash decoded pixels so changing JPEG metadata cannot make the same
         # camera image count as an independent confirmation.
         return hashlib.sha256(memoryview(frame)).hexdigest()
@@ -487,67 +497,103 @@ def create_app(database=None, engine=None, allowed_hosts=None):
             log_match_diagnostic(recognition)
         except FaceError:
             if session_id is not None:
-                attendance.reset(session_id, scanner_id)
+                attendance.reset(session_id, scanner_id, received_at=received_at)
             raise
         tracking=None
         if session_id is not None:
+            frame_id = frame_fingerprint(frame)
             with store.lock,shared.lock:
                 shared.guard(data)
                 tracking=attendance.observe(session_id,scanner_id,{**recognition,'box':box,'quality':analysis.get('quality',{})},action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive'),
-                    frame_id=frame_fingerprint(data.get('image'),frame),received_at=received_at,capture_age_ms=data.get('capture_age_ms'))
+                    frame_id=frame_id,received_at=received_at,capture_age_ms=data.get('capture_age_ms'))
             if tracking.get('newly_moved'):shared.attendance_changed()
         return jsonify(**recognition, box=box, threshold=MATCH_THRESHOLD, attendance=tracking,
                        processing_ms=round((time.perf_counter()-processing_started)*1000,1))
+
+    def identify_group(image, detector, for_attendance):
+        frame = decode_frame(image)
+        result = detector.extract_attendance_group(frame) if for_attendance else detector.extract_group(frame)
+        matches = iter(identify_candidates(candidates) for candidates in store.candidates_batch([face['embedding'] for face in result['faces'] if face['status']=='ready'], top_two=True))
+        faces = []
+        for face in result['faces']:
+            details = {key:value for key,value in face.items() if key != 'embedding'}
+            identified = next(matches) if face['status'] == 'ready' else None
+            if identified:
+                log_match_diagnostic(identified)
+            faces.append({**details, **identified} if identified else details)
+        counts = {}
+        for face in faces:
+            if face['status'] == 'matched':
+                person_id = face['person']['id']
+                counts[person_id] = counts.get(person_id, 0) + 1
+        for face in faces:
+            if face['status'] == 'matched' and counts[face['person']['id']] > 1:
+                face['status'] = 'ambiguous'
+                face['message'] = 'Multiple faces match the same enrollment. No attendance marked for those faces.'
+        return {**result, 'faces': faces}, frame_fingerprint(frame) if for_attendance else None
 
     @app.post('/api/recognize/group')
     def recognize_group():
         processing_started = time.perf_counter()
         received_at = attendance.clock()
-        data = frame_payload()
+        data = frame_payload(batch=True)
         if data.get('person_id') is not None:
             raise FaceError('invalid_person', 'Selected-person verification requires one face. Use the single-face scanner.')
         session_id = data.get('attendance_session_id')
-        scanner_id = None
+        is_batch = 'capture_ages_ms' in data or 'images' in data
+        if is_batch:
+            images, ages = data.get('images'), data.get('capture_ages_ms')
+            if (session_id is None or not isinstance(images, list) or not 2 <= len(images) <= 3
+                    or not isinstance(ages, list) or len(ages) != len(images)
+                    or any(type(age) not in (int, float) or not 0 <= age <= MAX_BUFFER_AGE * 1000 for age in ages)
+                    or any(older <= newer for older, newer in zip(ages, ages[1:]))):
+                raise FaceError('invalid_request', 'Send two or three attendance frames in capture order.')
+        else:
+            images, ages = [data.get('image')], [data.get('capture_age_ms')]
+
         if session_id is not None:
             attendance.ensure_active(session_id)
             scanner_id = attendance.scanner(data.get('scanner_id'))
-            with shared.lock:shared.guard(data)
+            with shared.lock:
+                shared.guard(data)
         try:
-            frame = decode_frame(data.get('image'))
             detector = get_engine()
-            result = detector.extract_attendance_group(frame) if session_id is not None else detector.extract_group(frame)
-            matches = iter(identify_candidates(candidates) for candidates in store.candidates_batch([face['embedding'] for face in result['faces'] if face['status']=='ready'], top_two=True))
-            faces = []
-            for face in result['faces']:
-                details = {key:value for key,value in face.items() if key != 'embedding'}
-                identified = next(matches) if face['status'] == 'ready' else None
-                if identified:
-                    log_match_diagnostic(identified)
-                faces.append({**details, **identified} if identified else details)
-            counts = {}
-            for face in faces:
-                if face['status'] == 'matched':
-                    person_id = face['person']['id']
-                    counts[person_id] = counts.get(person_id, 0) + 1
-            for face in faces:
-                if face['status'] == 'matched' and counts[face['person']['id']] > 1:
-                    face['status'] = 'ambiguous'
-                    face['message'] = 'Multiple faces match the same enrollment. No attendance marked for those faces.'
+            if is_batch:
+                # Limit outstanding frame work across batches. Read futures in capture order.
+                with batch_lock:
+                    futures = [frame_workers.submit(identify_group, image, detector, True) for image in images]
+                    try:
+                        scans = [future.result() for future in futures]
+                    finally:
+                        wait(futures)
+            else:
+                scans = [identify_group(images[0], detector, session_id is not None)]
+
+            moved = False
             if session_id is not None:
-                with store.lock,shared.lock:
+                with store.lock, shared.lock:
                     shared.guard(data)
-                    updates = attendance.observe_group(session_id, scanner_id, faces, data.get('attendance_action','check_in'),data.get('crossing_axis','x'),data.get('entry_direction','positive'),
-                        frame_id=frame_fingerprint(data.get('image'),frame),received_at=received_at,capture_age_ms=data.get('capture_age_ms'))
-                if any(update.get('newly_moved') for update in updates):shared.attendance_changed()
-                for face, update in zip(faces, updates):
-                    face['attendance'] = update
-            retry_after = min((update['retry_after_ms'] for update in updates if update['status'] in
-                               ('confirming','tracking','present','checked_out')), default=500 if faces else 600) if session_id is not None else 650
-            return jsonify(**{**result, 'faces':faces}, threshold=MATCH_THRESHOLD, retry_after_ms=retry_after,
-                           processing_ms=round((time.perf_counter()-processing_started)*1000,1))
+                    for (scan, frame_id), age in zip(scans, ages):
+                        updates = attendance.observe_group(
+                            session_id, scanner_id, scan['faces'], data.get('attendance_action', 'check_in'),
+                            data.get('crossing_axis', 'x'), data.get('entry_direction', 'positive'),
+                            frame_id=frame_id, received_at=received_at, capture_age_ms=age)
+                        for face, update in zip(scan['faces'], updates):
+                            face['attendance'] = update
+                        moved |= any(update.get('newly_moved') for update in updates)
+                        scan['retry_after_ms'] = min(
+                            (update['retry_after_ms'] for update in updates if update['status'] in
+                             ('confirming', 'tracking', 'present', 'checked_out')),
+                            default=500 if scan['faces'] else 600)
+                if moved:
+                    shared.attendance_changed()
+            processing_ms = round((time.perf_counter() - processing_started) * 1000, 1)
+            results = [{**scan, 'threshold': MATCH_THRESHOLD, 'processing_ms': processing_ms,
+                        'retry_after_ms': scan.get('retry_after_ms', 650)} for scan, _ in scans]
+            return jsonify(scans=results) if is_batch else jsonify(results[0])
         except FaceError:
             if session_id is not None:
-                attendance.reset(session_id, scanner_id)
+                attendance.reset(session_id, scanner_id, received_at=received_at)
             raise
 
     @app.get("/api/attendance/sessions")
@@ -625,4 +671,5 @@ def create_app(database=None, engine=None, allowed_hosts=None):
 
 
 if __name__ == "__main__":
-    create_app().run(host="127.0.0.1", port=int(os.environ.get("PORT", "8080")), debug=False, threaded=True)
+    create_app(fast_confirmation=os.environ.get("IDENTIQ_DEV_FAST_CONFIRMATION") == "1").run(
+        host="127.0.0.1", port=int(os.environ.get("PORT", "8080")), debug=False, threaded=True)

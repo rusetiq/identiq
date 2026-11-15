@@ -15,9 +15,12 @@ from attendance_policy import (MATCH_THRESHOLD, MATCH_MARGIN, CONFIRMATIONS,
 
 
 class Attendance:
-    def __init__(self, store, clock=time.monotonic):
+    def __init__(self, store, clock=time.monotonic, *, fast_confirmation=False):
         self.store = store
         self.clock = clock
+        self.min_interval = .19 if fast_confirmation else MIN_INTERVAL
+        self.min_duration = .40 if fast_confirmation else MIN_DURATION
+        self.capture_interval_ms = 205 if fast_confirmation else 300
         self.sightings = {}
         self.crossings = {}
         self.frames = {}
@@ -133,10 +136,25 @@ class Attendance:
             raise FaceError("invalid_scanner", "Restart the camera scan and try again.") from exc
         return value
 
-    def reset(self, session_id, scanner_id):
+    def reset(self, session_id, scanner_id, *, received_at=None):
         with self.store.lock:
-            self.sightings = {key: value for key, value in self.sightings.items() if key[:2] != (session_id, scanner_id)}
-            self.crossings = {key:value for key,value in self.crossings.items() if key[:2] != (session_id,scanner_id)}
+            frame_key = (session_id, scanner_id)
+            if received_at is not None:
+                last = self.frames.get(frame_key)
+                if last and received_at < last['received_at']:
+                    return
+                # A failed newer frame must break the streak even if an older
+                # request is still running. Preserve the last known capture time.
+                captured_at = last['captured_at'] if last else -math.inf
+                self._remember_frame(frame_key, received_at, captured_at, self.clock())
+            self.sightings = {key: value for key, value in self.sightings.items() if key[:2] != frame_key}
+            self.crossings = {key: value for key, value in self.crossings.items() if key[:2] != frame_key}
+
+    def _remember_frame(self, frame_key, received_at, captured_at, now):
+        self.frames = {key: value for key, value in self.frames.items() if now - value['time'] < 30}
+        if len(self.frames) >= 256 and frame_key not in self.frames:
+            self.frames.pop(next(iter(self.frames)))
+        self.frames[frame_key] = {'received_at': received_at, 'captured_at': captured_at, 'time': now}
 
     def movement_options(self, action='check_in', axis='x', direction='positive'):
         if action not in ('check_in','check_out','automatic') or axis not in ('x','y') or direction not in ('positive','negative'):
@@ -200,17 +218,15 @@ class Attendance:
             self.crossings = {key:value for key,value in self.crossings.items() if key[0] != session_id}
         return result
 
-    @staticmethod
-    def outcome(status, count=0, message='No attendance marked.', **fields):
+    def outcome(self, status, count=0, message='No attendance marked.', **fields):
         return {'status':status, 'confirmations':count, 'required_confirmations':CONFIRMATIONS,
                 'newly_present':False, 'newly_moved':False, 'message':message,
-                'retry_after_ms':math.ceil(MIN_INTERVAL*1000), **fields}
+                'retry_after_ms':math.ceil(self.min_interval*1000), **fields}
 
-    @staticmethod
-    def confirmation_delay(evidence, now):
-        delay = MIN_INTERVAL - (now-evidence['time'])
+    def confirmation_delay(self, evidence, now):
+        delay = self.min_interval - (now-evidence['time'])
         if evidence['count'] >= CONFIRMATIONS-1:
-            delay = max(delay, MIN_DURATION - (now-evidence['started']))
+            delay = max(delay, self.min_duration - (now-evidence['started']))
         # One millisecond avoids scheduling exactly on a floating-point boundary.
         return max(40, math.ceil(delay*1000)+1)
 
@@ -258,27 +274,26 @@ class Attendance:
             if type(received_at) not in (int, float) or not math.isfinite(received_at):
                 self.reset(session_id, scanner_id)
                 return [self.outcome('stale_frame', message='Invalid camera timing. No attendance saved.') for _ in recognitions]
+            last = self.frames.get(frame_key)
+            if last and received_at < last['received_at']:
+                return [self.outcome('stale_frame', message='Discarded an out-of-order camera frame.') for _ in recognitions]
             if capture_age_ms is not None and (type(capture_age_ms) not in (int,float) or
                     not math.isfinite(capture_age_ms) or not 0 <= capture_age_ms <= MAX_BUFFER_AGE*1000):
-                self.reset(session_id, scanner_id)
+                self.reset(session_id, scanner_id, received_at=received_at)
                 return [self.outcome('stale_frame', message='Camera frame is too old. No attendance saved.') for _ in recognitions]
             captured_at = received_at - capture_age_ms/1000 if capture_age_ms is not None else received_at
             # Older clients do not send capture age; retain their existing
             # processing-time confirmation behavior.
             evidence_time = captured_at if capture_age_ms is not None else now
-            last = self.frames.get(frame_key)
             # Check before pruning identities: a late frame must not erase newer evidence.
-            if last and (received_at < last['received_at'] or captured_at < last.get('captured_at', last['received_at'])):
+            if last and captured_at < last['captured_at']:
                 return [self.outcome('stale_frame', message='Discarded an out-of-order camera frame.') for _ in recognitions]
-            self.frames = {key:value for key,value in self.frames.items() if now-value['time'] < 30}
-            if len(self.frames) >= 256 and frame_key not in self.frames:
-                self.frames.pop(next(iter(self.frames)))
             if (not isinstance(frame_id,str) or len(frame_id) != 64 or
                     not 0 <= now-received_at <= MAX_FRAME_AGE or
                     not 0 <= now-captured_at <= MAX_FRAME_AGE):
-                self.reset(session_id, scanner_id)
+                self.reset(session_id, scanner_id, received_at=received_at)
                 return [self.outcome('stale_frame', message='Waiting for a fresh camera frame. No attendance saved.') for _ in recognitions]
-            self.frames[frame_key] = {'received_at':received_at, 'captured_at':captured_at, 'time':now}
+            self._remember_frame(frame_key, received_at, captured_at, now)
             counts = {}
             for item in recognitions:
                 if item['status'] == 'matched':
@@ -331,7 +346,7 @@ class Attendance:
             evidence = previous
         # Retries and bursts are not independent observations. Do not update their
         # timestamps or crossing state, even after an identity was confirmed.
-        if frame_id in evidence['frames'] or previous and now-previous['time'] < MIN_INTERVAL:
+        if frame_id in evidence['frames'] or previous and now-previous['time'] < self.min_interval:
             if evidence.get('confirmed'):
                 status = ('tracking' if action == 'automatic' else
                           'present' if action == 'check_in' and row['campus_state'] == 'on_campus' else
@@ -350,7 +365,7 @@ class Attendance:
         if len(self.sightings) >= 256 and key not in self.sightings:
             self.sightings.pop(next(iter(self.sightings)))
         self.sightings[key] = evidence
-        if evidence['count'] < CONFIRMATIONS or now-evidence['started'] < MIN_DURATION:
+        if evidence['count'] < CONFIRMATIONS or now-evidence['started'] < self.min_duration:
             return self.outcome('confirming', evidence['count'], message='Confirming the same identity across fresh, clear camera frames.',
                                 retry_after_ms=self.confirmation_delay(evidence,now))
         evidence['confirmed'] = True

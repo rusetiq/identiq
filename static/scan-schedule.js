@@ -1,11 +1,19 @@
 'use strict';
 window.IdentiqScan = (() => {
   let sample = null;
-  function delay(data, attendance) {
+  function delay(data, attendance, frameElapsedMs) {
     if (!attendance) return data.face_count > 0 || data.box ? 150 : 650;
     if(!data.face_count && !data.box)return 100;
     // Keep searching promptly when faces are visible but not yet recognizable.
     if(Array.isArray(data.faces) && !data.faces.some(face=>face.status==='matched'))return 100;
+    const confirming = (data.faces || []).map(face => face.attendance)
+      .filter(update => update?.status === 'confirming' && Number.isFinite(update.retry_after_ms));
+    if (confirming.length && Number.isFinite(frameElapsedMs)) {
+      // These hints are relative to the frame's capture time. Encoding,
+      // transport and inference have already used part of that interval.
+      const nextCapture = Math.min(...confirming.map(update => update.retry_after_ms));
+      return Math.max(0, Math.min(1000, Math.ceil(nextCapture + 10 - frameElapsedMs)));
+    }
     const hint = data.retry_after_ms;
     // The next inference also consumes time before the server can count it.
     // Use the last processing duration as an estimate; the server still checks

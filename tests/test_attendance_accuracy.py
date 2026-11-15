@@ -1,12 +1,14 @@
 """Regression checks for false presence, using controlled impostor similarities."""
 import hashlib
+import json
 import base64
 import uuid
 
 import numpy as np
 import pytest
 
-from biometrics import normalize
+from attendance import Attendance
+from biometrics import FaceError, normalize
 from test_app import setup, image, enroll, vector, fresh_image
 from test_attendance import start, clock, recognize
 from test_group_faces import response_faces, scan_group
@@ -281,3 +283,80 @@ def test_server_pacing_reaches_confirmation_with_three_fresh_frames(setup,image,
             moment[0]+=delay/1000
     assert moment[0]-started>=.6
     assert update['status']=='present' and update['newly_moved']
+
+
+@pytest.mark.parametrize('group', [False, True])
+def test_late_inference_error_preserves_newer_confirmation(setup, image, group):
+    client, headers, engine, sid, moment, scanner = prepare(setup, image)
+    # Complete a newer request while the earlier recognition is still running.
+    # Separate clients model separate Flask request contexts.
+    newer_client = client.application.test_client()
+    credentials = json.loads(client.application.extensions['portal_access'].staff_login_path.read_text())
+    assert newer_client.post('/api/staff/login', json=credentials, headers={'X-Portal-Request': '1'}).status_code == 200
+    post_scan = scan_group if group else recognize
+    good = (lambda frame: response_faces([engine.vector])) if group else engine.extract
+    method = 'extract_group' if group else 'extract'
+
+    def fail_after_newer_request(frame):
+        setattr(engine, method, good)
+        moment[0] += .35
+        response = post_scan(newer_client, headers, image, sid, scanner).json
+        face = response['faces'][0] if group else response
+        assert face['attendance']['confirmations'] == 1
+        raise FaceError('invalid_embedding', 'Earlier frame failed')
+
+    setattr(engine, method, fail_after_newer_request)
+    assert post_scan(client, headers, image, sid, scanner).json['code'] == 'invalid_embedding'
+    for expected in (2, 3):
+        moment[0] += .35
+        response = post_scan(client, headers, image, sid, scanner).json
+        face = response['faces'][0] if group else response
+        assert face['attendance']['confirmations'] == expected
+    assert face['attendance']['newly_present']
+
+
+def test_newer_failed_request_invalidates_inflight_older_frame(setup, image):
+    client, headers, engine, sid, moment, scanner = prepare(setup, image)
+    newer_client = client.application.test_client()
+    credentials = json.loads(client.application.extensions['portal_access'].staff_login_path.read_text())
+    assert newer_client.post('/api/staff/login', json=credentials, headers={'X-Portal-Request': '1'}).status_code == 200
+
+    def recognize_after_newer_failure(frame):
+        moment[0] += .35
+        response = newer_client.post('/api/recognize', headers=headers, json={
+            'image': 'bad frame', 'attendance_session_id': sid, 'scanner_id': scanner,
+        })
+        assert response.json['code'] == 'invalid_image'
+        return engine.vector, [0.1, 0.1, 0.5, 0.5]
+
+    engine.extract = recognize_after_newer_failure
+    assert recognize(client, headers, image, sid, scanner).json['attendance']['status'] == 'stale_frame'
+    no_attendance(client, sid)
+
+
+def test_fast_trial_keeps_three_distinct_matches_and_enforces_400ms(setup, image):
+    client, _, engine, sid, moment, scanner = prepare(setup, image)
+    store = client.application.extensions['attendance'].store
+    attendance = Attendance(store, clock=lambda: moment[0], fast_confirmation=True)
+    face = response_faces([engine.vector])['faces'][0]
+    evidence = {**face, 'status': 'matched', 'person': store.people()[0],
+                'similarity': .90, 'candidate_count': 1}
+
+    def observe(scanner_id, seconds, frame, sighting=evidence):
+        moment[0] = 100 + seconds
+        return attendance.observe(sid, scanner_id, sighting,
+                                  frame_id=hashlib.sha256(frame.encode()).hexdigest())
+
+    # Fitting three separated matches into 390 ms still cannot mark attendance.
+    for index, seconds in enumerate((0, .195, .390), start=1):
+        update = observe(scanner, seconds, str(index))
+        assert update['confirmations'] == index
+        assert update['status'] == 'confirming'
+    no_attendance(client, sid)
+
+    scanner = str(uuid.uuid4())
+    assert observe(scanner, .8, 'a')['confirmations'] == 1
+    assert observe(scanner, .97, 'too soon')['confirmations'] == 1
+    assert observe(scanner, 1, 'a')['confirmations'] == 1
+    assert observe(scanner, 1.001, 'b')['confirmations'] == 2
+    assert observe(scanner, 1.202, 'c')['newly_present']
