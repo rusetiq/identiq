@@ -2,10 +2,12 @@
 window.IdentiqScan = (() => {
   let sample = null;
   function delay(data, attendance, frameElapsedMs) {
-    if (!attendance) return data.face_count > 0 || data.box ? 150 : 650;
-    if(!data.face_count && !data.box)return 100;
+    const visible = data.face_count > 0 || !!data.box;
+    const elapsed = Number.isFinite(frameElapsedMs) ? Math.max(0, frameElapsedMs) : 0;
+    if (!attendance) return Math.max(25, Math.ceil((visible ? 150 : 100) - elapsed));
     // Keep searching promptly when faces are visible but not yet recognizable.
-    if(Array.isArray(data.faces) && !data.faces.some(face=>face.status==='matched'))return 100;
+    if (!visible || Array.isArray(data.faces) && !data.faces.some(face => face.status === 'matched'))
+      return Math.max(25, Math.ceil(100 - elapsed));
     const confirming = (data.faces || []).map(face => face.attendance)
       .filter(update => update?.status === 'confirming' && Number.isFinite(update.retry_after_ms));
     if (confirming.length && Number.isFinite(frameElapsedMs)) {

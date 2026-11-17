@@ -204,7 +204,7 @@ async function startCamera(switchTo) {
     const preferred = state.cameraFacing || (state.mode === "attendance" ? "environment" : "user");
     const openCamera = facingMode => navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 40 } }
+      video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } }
     });
     let stream;
     let requested = switchTo || preferred;
@@ -346,7 +346,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
   let failures = 0;
   const attendancePayload = (image, captureAgeMs) => ({ image, capture_age_ms: captureAgeMs, person_id: null, ...sharedContext, attendance_session_id: attendanceSessionId, scanner_id: scannerId, attendance_action: state.movementMode, crossing_axis: $("crossing-axis").value, entry_direction: $("entry-direction").value });
   // Retain camera detail for smaller faces; frame() never upscales the source.
-  const recognitionFrame = () => frame(captureCanvas, 1920, .78, !!attendanceSessionId);
+  const recognitionFrame = () => frame(captureCanvas, 1920, .78, true);
   // Capture while inference runs so a walking person can still be confirmed.
   // Keep a small, chronological, in-memory buffer and discard old images.
   const pendingFrames = window.IdentiqScan.faceBuffer(); let lastCapturedAt = -Infinity;
@@ -383,7 +383,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
     while (state.scanning && generation === state.generation && state.stream) {
       let recognitionPayload = null;
       let capturedAt = null;
-      let nextScanDelay = attendanceSessionId ? 40 : 650;
+      let nextScanDelay = attendanceSessionId ? 40 : 100;
       try {
         const selected = $("person-select").value;
         let captured;
@@ -435,18 +435,11 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
         if (data.status === "matched") {
           state.streak = state.candidate === data.person.id ? state.streak + 1 : 1;
           state.candidate = data.person.id;
-          const confirmed = attendanceSessionId ? data.attendance?.status === "present" : state.streak >= 3;
-          const provisional = attendanceSessionId && data.attendance?.status === 'confirming';
-          result(confirmed || provisional ? data.person.name : "Confirming match…", confirmed ? `Identity ${selected ? "verified" : "recognized"} · Database ID ${data.person.id}` : provisional ? `Provisional match · ${data.attendance.confirmations} of ${data.attendance.required_confirmations} confirmations · not marked present yet` : `${state.streak} of 3 consecutive matches`, confirmed ? "matched" : "", data.similarity);
-          if (attendanceSessionId) {
-            const attendance = data.attendance;
-            if (attendance.status === "present") {
-              result(data.person.name, "Marked present for this session.", "matched", data.similarity);
-              if (attendance.newly_present) { toast(`${data.person.name} marked present.`); await refreshAttendance(attendanceSessionId); }
-            } else if (attendance.status === "confirming") result(data.person.name, `Provisional match · ${attendance.confirmations} of ${attendance.required_confirmations} confirmations · not marked present yet`, "", data.similarity);
-            else result("Face needs review", attendance.message, "warning", data.similarity);
-          }
-          drawBox(data.box, confirmed, confirmed || provisional ? data.person.name : "Confirming face…");
+          const confirmed = state.streak >= 3;
+          const detail = confirmed ? `Identity verified · Database ID ${data.person.id}` :
+            `Provisional match · ${state.streak} of 3 consecutive matches`;
+          result(data.person.name, detail, confirmed ? "matched" : "", data.similarity);
+          drawBox(data.box, confirmed, data.person.name);
         } else {
           state.streak = 0; state.candidate = null;
           result({ unknown: "Unknown face", ambiguous: "Uncertain match", mismatch: "Identity mismatch", empty: "No enrolled faces" }[data.status] || "Try again", data.message, "warning", data.similarity ?? null);
@@ -468,7 +461,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
         state.streak = 0; state.candidate = null; clearBox();
         groupStreaks.clear(); showCameraNames([]); $("scan-face-results").replaceChildren(); $("scan-face-results").hidden = true;
         result("Adjust your camera view", error.message, "warning");
-        if (!["no_face", "multiple_faces", "blurry", "too_small", "uncertain_detection", "quality"].includes(error.code)) { stopScan(); toast(error.message); break; }
+        if (!["no_face", "multiple_faces", "blurry", "low_light", "too_small", "uncertain_detection", "quality"].includes(error.code)) { stopScan(); toast(error.message); break; }
       }
       await sleep(nextScanDelay);
     }
@@ -484,25 +477,33 @@ async function showGroupResults(data, streaks, sessionId) {
   const seen = new Set(data.faces.filter(face => face.status === 'matched').map(face => face.person.id));
   for (const id of streaks.keys()) if (!seen.has(id)) streaks.delete(id);
   let confirmed = 0, confirming = 0; const newlyPresent = [], highlights = [];
-  for (const [index, face] of data.faces.entries()) {
-    if (["unknown", "empty"].includes(face.status)) continue;
-    let name = `Face ${index + 1}`, detail = face.message || 'No attendance marked.', matched = false;
+  const labels = {
+    low_light: 'Low light', blurry: 'Blurry face', too_small: 'Face too far away',
+    uncertain_detection: 'Face unclear', ambiguous: 'Uncertain match',
+    unknown: 'Unknown face', empty: 'No face enrollments',
+  };
+  for (const face of data.faces) {
+    let name = labels[face.code || face.status] || 'Face needs review';
+    let detail = face.message || 'No attendance marked.', matched = false;
+    if (face.status === 'unknown' && face.quality?.brightness < 40)
+      detail = 'Low light. Face the camera with light in front of you.';
     if (face.status === 'matched') {
       name = face.person.name; streaks.set(face.person.id, (streaks.get(face.person.id) || 0) + 1);
       matched = sessionId ? ['present', 'checked_out'].includes(face.attendance.status) || face.attendance.campus_state === 'on_campus' && face.attendance.status === 'tracking' : streaks.get(face.person.id) >= 3;
       if (matched) { confirmed++; detail = sessionId ? face.attendance.status === 'manual_override' ? 'Present · staff correction' : face.attendance.campus_state === 'checked_out' ? 'Checked out' : 'Checked in' : 'Recognized'; }
-      else if (!sessionId || face.attendance.status === 'confirming') { confirming++; detail = `${sessionId ? face.attendance.confirmations : streaks.get(face.person.id)} of ${sessionId ? face.attendance.required_confirmations : 3} fresh matches · hold still`; }
+      else if (!sessionId || face.attendance.status === 'confirming') { confirming++; }
       else detail = face.attendance.status === 'manual_override' ? `Staff marked ${face.attendance.attendance_status}. Camera status kept unchanged.` : face.attendance.message;
       if (!matched) {
         if (sessionId && face.attendance?.status === 'confirming') {
-          name = face.person.name;
           detail = `Provisional match · ${face.attendance.confirmations} of ${face.attendance.required_confirmations} confirmations · not marked present yet`;
         } else if (sessionId && face.attendance?.status === 'tracking') {
-          name = face.person.name; detail = 'Identity confirmed · cross the line to record movement';
-        } else name = !sessionId ? 'Confirming face…' : 'Face needs review';
+          detail = 'Identity confirmed · cross the line to record movement';
+        } else if (!sessionId) {
+          detail = `Provisional match · ${streaks.get(face.person.id)} of 3 fresh matches`;
+        } else name = 'Face needs review';
       }
       if (face.attendance?.newly_moved || face.attendance?.newly_present) newlyPresent.push(`${name} ${face.attendance.action === 'check_out' ? 'checked out' : 'checked in'}`);
-    } else if (face.status === 'ambiguous') name = 'Uncertain match';
+    }
     const row = document.createElement('div'); row.className = `scan-face-row ${matched ? 'confirmed' : face.status === 'matched' ? 'confirming' : 'warning'}`;
     const title = document.createElement('strong'); title.textContent = name; const text = document.createElement('span'); text.textContent = detail;
     if (face.person) row.dataset.personId = face.person.id;

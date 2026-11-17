@@ -123,6 +123,23 @@ def test_exact_face_input_cache_reuses_only_identical_inputs_and_expires(monkeyp
     assert len(engine._embedding_cache) == biometrics.MAX_FACES * 4
 
 
+def test_dim_aligned_face_is_brightened_without_reprocessing_bright_faces():
+    engine = biometrics.FaceEngine.__new__(biometrics.FaceEngine)
+    engine.recognizer = object()
+    inputs = []
+    engine._run_recognizer = lambda blob: inputs.append(blob) or np.ones(512, dtype=np.float32)
+    face = np.array([0, 0, 112, 112, *biometrics.ARCFACE_REFERENCE.flatten(), .99], dtype=np.float32)
+    bright = np.full((112, 112, 3), 120, dtype=np.uint8)
+    backlit = bright.copy()
+    backlit[48:96, 32:80] = 20
+    engine._arcface_embedding(bright, face)
+    engine._arcface_embedding(backlit, face)
+
+    assert inputs[0][0, 0, 70, 55] == pytest.approx(120 / 127.5 - 1)
+    assert inputs[1][0, 0, 70, 55] > 20 / 127.5 - 1
+    assert backlit[70, 55, 0] == 20
+
+
 def test_invalid_inference_is_never_cached():
     from collections import OrderedDict
     engine = biometrics.FaceEngine.__new__(biometrics.FaceEngine)

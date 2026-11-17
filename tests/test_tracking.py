@@ -57,6 +57,24 @@ def test_detected_but_blurred_face_keeps_landmarks_and_exact_reason():
     assert error.value.code == "blurry"
 
 
+def test_dark_scene_is_lifted_for_detection_but_dark_blur_still_fails_quality(monkeypatch):
+    picture = np.full((512, 512, 3), 15, np.uint8)
+    picture[384:] = 30
+    tracker = engine(face())
+    detector_inputs = []
+    def inspect_detector_input(image):
+        detector_inputs.append(image)
+        return None, None if image is picture else face()
+
+    monkeypatch.setattr(tracker.detector, 'detect', inspect_detector_input)
+    result = tracker.analyze(picture)
+    assert detector_inputs[0] is picture
+    assert detector_inputs[1].mean() > picture.mean()
+    assert result['code'] == 'low_light'
+    assert result['quality']['brightness'] == 15
+    assert result['quality']['sharpness'] == 0
+
+
 def test_small_face_reports_position_instead_of_lighting():
     result = engine(face(40)).analyze(smooth_image())
     assert result["code"] == "too_small"

@@ -28,6 +28,8 @@ EMBEDDING_DIMENSION = 512
 ENROLLMENT_THRESHOLD = 0.45
 ENROLLMENT_MARGIN = 0.06
 logger = logging.getLogger(__name__)
+EXPOSURE_LEVELS = np.arange(256, dtype=np.float32)
+SHADOW_WEIGHT = (1 - EXPOSURE_LEVELS / 255) ** 2
 
 # The five-point ArcFace reference landmark locations for a 112 x 112 crop.
 ARCFACE_REFERENCE = np.asarray([
@@ -88,10 +90,23 @@ def decode_frame(value):
     return frame
 
 
+def _lift_shadows(image, sample):
+    """Use a small luminance sample and preserve highlights and black levels."""
+    luminance = cv2.mean(cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY))[0]
+    if luminance >= 65:
+        return image
+    gain = min(3, 65 / max(luminance, 1) - 1)
+    curve = np.rint(EXPOSURE_LEVELS * (1 + gain * SHADOW_WEIGHT)).astype(np.uint8)
+    return cv2.LUT(image, curve)
+
+
 def _cpu_recognizer(model_path):
     options = ort.SessionOptions()
-    options.intra_op_num_threads = 1
+    # Share a small pool between inference calls and leave capacity for YuNet
+    # and concurrent requests. Idle inference workers should yield to them.
+    options.intra_op_num_threads = max(1, min(4, (os.cpu_count() or 1) // 2))
     options.inter_op_num_threads = 1
+    options.add_session_config_entry('session.intra_op.allow_spinning', '0')
     return ort.InferenceSession(str(model_path), sess_options=options,
                                 providers=['CPUExecutionProvider'])
 
@@ -163,12 +178,10 @@ class FaceEngine:
         if transform is None:
             raise FaceError("invalid_embedding", "Could not align facial features. Keep your face toward the camera.")
         aligned = cv2.warpAffine(image, transform, (112, 112), flags=cv2.INTER_LINEAR, borderValue=0)
-        blob = cv2.dnn.blobFromImage(aligned, 1.0 / 127.5, (112, 112),
-                                     (127.5, 127.5, 127.5), swapRB=True)
-        # Only byte-identical model inputs can reuse an embedding. This does not
-        # reuse a name, a quality result, or an attendance confirmation.
+        # Hash the original crop so exposure correction cannot make two
+        # different captures share a cache entry.
         cache = getattr(self, '_embedding_cache', None)
-        key = hashlib.sha256(memoryview(blob)).digest() if cache is not None else None
+        key = hashlib.sha256(memoryview(aligned)).digest() if cache is not None else None
         if cache is not None:
             with self._embedding_cache_lock:
                 now = time.monotonic()
@@ -177,6 +190,11 @@ class FaceEngine:
                         del cache[old_key]
                 if key in cache:
                     return cache[key][1].copy()
+        # Measure the face itself so a bright background does not hide a
+        # backlit face. Avoid the alignment padding and most of the hair.
+        aligned = _lift_shadows(aligned, aligned[48:96:2, 32:80:2])
+        blob = cv2.dnn.blobFromImage(aligned, 1.0 / 127.5, (112, 112),
+                                     (127.5, 127.5, 127.5), swapRB=True)
         vector = normalize(self._run_recognizer(blob))
         if cache is not None:
             with self._embedding_cache_lock:
@@ -222,10 +240,11 @@ class FaceEngine:
 
     def _detect(self, image, max_side=640, far=False):
         faces=self._detect_at_size(image,max_side)
+        detailed_size = min(1920, max(image.shape[:2]))
         # A second, larger pass preserves small facial features without upscaling
         # beyond the pixels actually supplied by the device camera.
         if far and max(image.shape[:2])>max_side and (not len(faces) or np.min(faces[:,2:4])<128):
-            detailed=self._detect_at_size(image,min(1920,max(image.shape[:2])))
+            detailed=self._detect_at_size(image,detailed_size)
             if len(detailed):
                 candidates=np.concatenate([detailed,faces])
                 kept=[]
@@ -240,6 +259,15 @@ class FaceEngine:
                             duplicate=True;break
                     if not duplicate:kept.append(face)
                 faces=np.asarray(kept,dtype=np.float32)
+        if not len(faces):
+            step = max(1, max(image.shape[:2]) // 32)
+            sample = image[::step, ::step]
+            # A uniform scene has no facial detail to recover. Keep existing
+            # boxes and landmarks whenever unadjusted detection succeeds.
+            if np.ptp(sample) >= 8:
+                lifted = _lift_shadows(image, sample)
+                if lifted is not image:
+                    faces = self._detect_at_size(lifted, detailed_size if far else max_side)
         return faces
 
     def _quality(self, image, face, minimum_fraction=.10, attendance=False):
@@ -274,9 +302,12 @@ class FaceEngine:
         brightness = cv2.mean(gray)[0]
         quality["sharpness"] = round(sharpness, 1)
         quality["brightness"] = round(brightness, 1)
+        issue = quality_issue(quality) if attendance else None
+        if brightness < 40 and (sharpness < 6 or issue):
+            return {**details, "status": "adjust", "code": "low_light",
+                    "message": "Too little facial detail in this light. Face the camera and add light in front of you."}, face
         if sharpness < 6:
             return {**details, "status": "adjust", "code": "blurry", "message": "Face detected, but details are very soft. Hold still and check camera focus."}, face
-        issue = quality_issue(quality) if attendance else None
         if issue:
             return {**details, 'status':'adjust', **issue}, face
         return {**details, "status": "ready", "message": "Face detected. Ready to capture."}, face

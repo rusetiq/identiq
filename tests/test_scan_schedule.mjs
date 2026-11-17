@@ -9,14 +9,22 @@ function scheduling(){
   return context.window.IdentiqScan;
 }
 
-test('camera follows server confirmation pacing and slows empty scenes',()=>{
+test('camera follows server confirmation pacing and scans empty scenes promptly',()=>{
   const scan=scheduling();
   assert.equal(scan.delay({face_count:3,retry_after_ms:351},true),351);
   assert.equal(scan.delay({face_count:0},true),100);
   assert.equal(scan.delay({face_count:3},true),250);
-  assert.equal(scan.delay({retry_after_ms:351},false),650);
+  assert.equal(scan.delay({retry_after_ms:351},false),100);
   assert.equal(scan.delay({face_count:3},false),150);
   assert.equal(scan.delay({box:[.1,.1,.3,.3]},false),150);
+});
+
+test('walk-by search counts time already spent on a frame',()=>{
+  const scan=scheduling();
+  assert.equal(scan.delay({face_count:0},false,60),40);
+  assert.equal(scan.delay({face_count:2},false,90),60);
+  assert.equal(scan.delay({face_count:0},true,90),25);
+  assert.equal(scan.delay({face_count:1,faces:[{status:'unknown'}]},true,70),30);
 });
 
 test('attendance pacing includes inference time while retaining a bounded delay',()=>{
