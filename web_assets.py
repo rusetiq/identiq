@@ -45,13 +45,16 @@ class WebAssets:
         return response.make_conditional(request)
 
     def compress_page(self, response):
-        if (response.status_code != 200 or response.mimetype != 'text/html' or response.is_streamed
+        roster = request.endpoint == 'attendance_overview' and response.mimetype == 'application/json'
+        if (response.status_code != 200 or (response.mimetype != 'text/html' and not roster) or response.is_streamed
                 or 'Content-Encoding' in response.headers):
             return
         response.vary.add('Accept-Encoding')
         if self.accepts_gzip():
             raw = response.get_data()
-            packed = gzip.compress(raw,compresslevel=6,mtime=0)
+            if roster and len(raw) < 8192:
+                return
+            packed = gzip.compress(raw,compresslevel=1 if roster else 6,mtime=0)
             if len(packed)<len(raw):
                 response.set_data(packed)
                 response.headers['Content-Encoding'] = 'gzip'

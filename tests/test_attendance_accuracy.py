@@ -279,9 +279,9 @@ def test_server_pacing_reaches_confirmation_with_three_fresh_frames(setup,image,
             assert update['status']=='confirming'
             no_attendance(client,sid)
             delay=result['retry_after_ms'] if group else update['retry_after_ms']
-            assert 250<=delay<=351
+            assert 190<=delay<=211
             moment[0]+=delay/1000
-    assert moment[0]-started>=.6
+    assert .40<=moment[0]-started<=.405
     assert update['status']=='present' and update['newly_moved']
 
 
@@ -334,10 +334,10 @@ def test_newer_failed_request_invalidates_inflight_older_frame(setup, image):
     no_attendance(client, sid)
 
 
-def test_fast_trial_keeps_three_distinct_matches_and_enforces_400ms(setup, image):
+def test_default_scanner_keeps_three_distinct_matches_and_enforces_400ms(setup, image):
     client, _, engine, sid, moment, scanner = prepare(setup, image)
     store = client.application.extensions['attendance'].store
-    attendance = Attendance(store, clock=lambda: moment[0], fast_confirmation=True)
+    attendance = Attendance(store, clock=lambda: moment[0])
     face = response_faces([engine.vector])['faces'][0]
     evidence = {**face, 'status': 'matched', 'person': store.people()[0],
                 'similarity': .90, 'candidate_count': 1}

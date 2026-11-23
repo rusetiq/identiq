@@ -32,3 +32,81 @@ test('turning camera off discards pending preview results',async()=>{
   tracker.start();tracker.stop();resolve({status:'ready',face_count:1});await new Promise(r=>setImmediate(r));
   assert.equal(tracker.analysis,null);assert.equal(tracker.running,false);assert.equal(tracker.canvas.dataset.faceCount,'0');
 });
+
+test('attendance refresh replaces changed records and preserves controls for other people',()=>{
+  const body={rows:[],dataset:{sessionId:'4'},insertBefore(row,next){
+    row.remove();
+    this.rows.splice(next ? this.rows.indexOf(next) : this.rows.length,0,row);
+  }};
+  const controls=new Map();
+  const get=id=>{
+    if(id==='attendance-roster')return {querySelector:()=>body};
+    if(!controls.has(id))controls.set(id,{value:''});
+    return controls.get(id);
+  };
+  let builds=0;
+  function rosterRow(session,person){
+    builds++;
+    return {dataset:{recordId:String(person.id)}, remove(){
+      const index=body.rows.indexOf(this);
+      if(index!==-1)body.rows.splice(index,1);
+    },replaceWith(other){body.rows.splice(body.rows.indexOf(this),1,other);}};
+  }
+  const context=vm.createContext({$:get,rosterRow,updateControls(){}});
+  const source=fs.readFileSync('static/app.js','utf8');
+  vm.runInContext(source.slice(source.indexOf('function renderRoster('),source.indexOf("$('roster-search').oninput")),context);
+  const detail={id:4,name:'Morning',status:'active',counts:{},roster:
+    Array.from({length:1000},(_,i)=>({id:i+1,name:String(i),status:'pending'}))};
+  context.renderRoster(detail);
+  const first=body.rows[0],second=body.rows[1];
+  detail.roster[1].status='present';
+  context.renderRoster(detail);
+  assert.equal(builds,1001);
+  assert.equal(body.rows[0],first);
+  assert.notEqual(body.rows[1],second);
+  get('roster-filter').value='present';
+  context.renderRoster(detail);
+  assert.deepEqual(body.rows.map(r=>r.dataset.recordId),['2']);
+});
+
+test('walk-by summary distinguishes one provisional frame from an existing check-in',async()=>{
+  function element(){return {children:[],append(...items){this.children.push(...items);},replaceChildren(){this.children=[];}};}
+  const holder=element(), results=[], events=[];
+  const context=vm.createContext({$:()=>holder,document:{createElement:element},performance:{now:()=>500},
+    walkbyLog:{record:(_,lines)=>events.push([...lines])},state:{movementMode:'check_in'},showCameraNames(){},liveTracker:{highlightGroup(){}},
+    result:(...args)=>results.push(args)});
+  const source=fs.readFileSync('static/app.js','utf8');
+  vm.runInContext(source.slice(source.indexOf('async function showGroupResults('),source.indexOf('async function enroll(')),context);
+  const streaks=new Map(), scan=faces=>context.showGroupResults({faces},streaks,4);
+  await scan([{status:'adjust',code:'too_small'}]);
+  await scan([{status:'adjust',code:'blurry'}]);
+  const face={status:'matched',person:{name:'Sample',id:1}};
+  await scan([{...face,attendance:{status:'confirming',confirmations:1,required_confirmations:3,attendance_status:'present'}}]);
+  await scan([]);
+  assert.deepEqual(events.slice(0,4),[['Face too far away'],['Blurry face'],['Sample · Provisional match · 1 of 3 confirmations · already marked present in this session'],[]]);
+  assert.deepEqual(results.at(-1),['Sample','Last pass had 1 of 3 confirming frames. Already marked present in this session.','warning']);
+  await scan([{...face,attendance:{status:'present',campus_state:'on_campus',newly_moved:false}}]);
+  await scan([]);
+  assert.deepEqual(results.at(-1),['Sample','Already checked in for this session.','matched']);
+});
+
+test('walk-by log separates visits and ignores repeated frames and idle time', () => {
+  const rows = [];
+  const list = {
+    children: rows, prepend: row => rows.unshift(row), replaceChildren: () => { rows.length = 0; },
+    get lastElementChild() { return {remove: () => rows.pop()}; },
+  };
+  const context = vm.createContext({$: () => list, document: {createElement: () => ({})}, performance: {timeOrigin: 1000}});
+  const source = fs.readFileSync('static/app.js', 'utf8');
+  vm.runInContext(source.slice(source.indexOf('function createWalkbyLog('), source.indexOf('async function scan(')), context);
+  const log = vm.runInContext('walkbyLog', context);
+  log.start(1);
+  for (const [index, text] of ['', 'Blurry face', 'Blurry face', '', '', 'Check-in saved'].entries())
+    log.record(index, text ? [text] : []);
+  assert.deepEqual(rows.map(row => row.textContent.slice(row.textContent.indexOf('Pass'))),
+    ['Pass 2 · Check-in saved', 'Pass 1 · No face in frame', 'Pass 1 · Blurry face']);
+  for (let i = 0; i < 120; i++) log.record(i, [String(i)]);
+  assert.equal(rows.length, 100);
+  log.start(2);
+  assert.equal(rows.length, 0);
+});

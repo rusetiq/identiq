@@ -31,7 +31,7 @@ test('walking scan sends up to three buffered frames together and renders them i
     }
     time=target;
   };
-  const state={scanning:false,stream:{},generation:0,movementMode:'check_in'};
+  const state={scanning:false,stream:{},generation:0,movementMode:'check_in',attendanceCaptureIntervalMs:300};
   const context=vm.createContext({window:{},state,AbortController,
     crypto:{randomUUID:()=> 'scanner'},performance:{now:()=>time},captureCanvas:{},
     $:id=>{if(!elements.has(id))elements.set(id,{value:'',textContent:''});return elements.get(id);},
@@ -39,7 +39,7 @@ test('walking scan sends up to three buffered frames together and renders them i
     frame(canvas,maxSide,quality){captures.push({time,maxSide,quality});return `frame at ${time}`;},
     setInterval(callback,interval){const id=++nextTimer;timers.set(id,{callback,interval,at:time+interval});return id;},
     clearInterval:id=>timers.delete(id),sleep:async ms=>advance(ms),
-    liveTracker:{accept(data,image){rendered.push(image);}},showGroupResults:async()=>{},
+    liveTracker:{accept(data,image){rendered.push(image);}},walkbyLog:{start(){}},showGroupResults:async()=>{},
     apiFrame:async(path,payload)=>{
       assert.equal(active++,0,'Recognition requests must not overlap');
       requests.push({time,images:payload.images||[payload.image],ages:payload.capture_ages_ms||[payload.capture_age_ms]});
@@ -56,7 +56,7 @@ test('walking scan sends up to three buffered frames together and renders them i
   await context.scan(1);
   assert.equal(requests.length,3);
   assert.ok(captures.length>=4,'Capture continues during the first request');
-  for(const capture of captures){assert.equal(capture.maxSide,1920);assert.equal(capture.quality,.78);}
+  for(const capture of captures){assert.equal(capture.maxSide,1920);assert.equal(capture.quality,capture.time < 1000 ? .78 : .9);}
   assert.deepEqual(requests[0],{time:0,images:['frame at 0'],ages:[0]});
   assert.equal(requests[1].time,1000);
   assert.equal(JSON.stringify(requests[1].images),JSON.stringify(['frame at 300','frame at 600','frame at 900']));
@@ -84,7 +84,7 @@ test('an empty result preserves frames captured while its inference ran',async()
     frame(){return `frame at ${time}`;},
     setInterval(callback,interval){const id=++nextTimer;timers.set(id,{callback,interval,at:time+interval});return id;},
     clearInterval:id=>timers.delete(id),sleep:async ms=>advance(ms),
-    liveTracker:{accept(){}},showGroupResults:async()=>{},
+    liveTracker:{accept(){}},walkbyLog:{start(){}},showGroupResults:async()=>{},
     apiFrame:async(path,payload)=>{
       requests.push({time,image:payload.images?.[0]||payload.image,age:payload.capture_ages_ms?.[0]??payload.capture_age_ms});
       advance(1000);
@@ -97,8 +97,8 @@ test('an empty result preserves frames captured while its inference ran',async()
   vm.runInContext(source.slice(source.indexOf('async function scan('),source.indexOf('async function showGroupResults(')),context);
   await context.scan(1);
   assert.equal(requests.length,2);
-  assert.equal(requests[1].image,'frame at 300');
-  assert.equal(requests[1].age,700);
+  assert.equal(requests[1].image,'frame at 205');
+  assert.equal(requests[1].age,795);
   assert.equal(timers.size,0);
 });
 

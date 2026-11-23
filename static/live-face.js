@@ -29,12 +29,14 @@ class FaceTracker {
     }
   }
   invalidate() {this.readyStreak=0;this.analysis=null;this.lastCapturedAt=performance.now();this.onUpdate();}
-  accept(data,image,capturedAt=performance.now()) {
+  accept(data,image,capturedAt=performance.now(),render=true) {
     if(!this.running || capturedAt<(this.lastCapturedAt || 0)) return;
     this.lastCapturedAt=capturedAt;
     this.readyStreak=data.status==='ready' && data.face_count===1 ? this.readyStreak+1 : 0;
     this.analysis={data,image,time:performance.now(),id:++this.lastSample};
-    this.status(data);this.render();this.onUpdate();
+    this.status(data);
+    if(render) this.render();
+    this.onUpdate();
   }
   status(data) {
     const ready=data?.status==='ready',panel=document.getElementById('tracking-status');

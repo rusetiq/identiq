@@ -15,14 +15,14 @@ test('camera follows server confirmation pacing and scans empty scenes promptly'
   assert.equal(scan.delay({face_count:0},true),100);
   assert.equal(scan.delay({face_count:3},true),250);
   assert.equal(scan.delay({retry_after_ms:351},false),100);
-  assert.equal(scan.delay({face_count:3},false),150);
-  assert.equal(scan.delay({box:[.1,.1,.3,.3]},false),150);
+  assert.equal(scan.delay({face_count:3},false),80);
+  assert.equal(scan.delay({box:[.1,.1,.3,.3]},false),80);
 });
 
 test('walk-by search counts time already spent on a frame',()=>{
   const scan=scheduling();
   assert.equal(scan.delay({face_count:0},false,60),40);
-  assert.equal(scan.delay({face_count:2},false,90),60);
+  assert.equal(scan.delay({face_count:2},false,90),25);
   assert.equal(scan.delay({face_count:0},true,90),25);
   assert.equal(scan.delay({face_count:1,faces:[{status:'unknown'}]},true,70),30);
 });
@@ -105,4 +105,91 @@ test('confirmation pacing subtracts full time since capture and chooses the earl
   ]};
   assert.equal(scan.delay(data,true,200),160);
   assert.equal(scan.delay(data,true,450),0);
+});
+
+test('camera-paced scanning overlaps inference with the next frame and cancels a stalled camera',async()=>{
+  const scan=scheduling(), controller=new AbortController();
+  let next=0;
+  const callbacks=new Map();
+  const clock=scan.frameClock({
+    requestVideoFrameCallback(fn){callbacks.set(++next,fn);return next;},
+    cancelVideoFrameCallback(id){callbacks.delete(id);},
+  },controller.signal);
+  assert.equal(scan.delay({face_count:1},false,20,true),0);
+  assert.equal(scan.delay({face_count:0},true,20,true),0);
+  assert.equal(scan.delay({face_count:1,retry_after_ms:191},true,20,true),191);
+  clock.captured();
+  let fresh=false;
+  const ready=clock.ready().then(()=>{fresh=true;});
+  await Promise.resolve();
+  assert.equal(fresh,false);
+  callbacks.get(next)();
+  callbacks.delete(next);
+  await ready;
+  assert.equal(clock.ready(),null);
+  clock.captured();
+  const stalled=clock.ready();
+  controller.abort();
+  await stalled;
+  assert.equal(callbacks.size,0);
+  clock.close();
+});
+
+test('large clear matches use compact frames with regular full-detail checks',()=>{
+  const size=scheduling().captureSize(), video={videoWidth:1920,videoHeight:1080};
+  const face={status:'matched',box:[.2,.2,.3,.4],quality:{brightness:100,detection_score:.98}};
+  assert.equal(size.next(0),1920);
+  size.observe({faces:[face]},video);
+  assert.equal(size.next(200),960);
+  size.observe({faces:[{...face,box:[.1,.1,.5,.6]}]},video);
+  assert.equal(size.next(300),640);
+  assert.equal(size.next(500),1920);
+  for(const faces of [[],[face,{...face,status:'unknown'}],[{...face,status:'unknown'}],[{...face,box:[0,0,.1,.1]}],
+    [{...face,quality:{brightness:25,detection_score:.99}}]]){
+    size.observe({faces},video);
+    assert.equal(size.next(600),1920);
+  }
+});
+
+test('slow empty attendance scans alternate compact searches with full-resolution checks',()=>{
+  const size=scheduling().captureSize(), video={videoWidth:1920,videoHeight:1080};
+  const empty={faces:[],code:'no_face',processing_ms:100};
+  assert.equal(size.next(0),1920);
+  size.observe(empty,video,1920);
+  assert.equal(size.next(100),960);
+  size.observe({...empty,processing_ms:15},video,960);
+  assert.equal(size.next(300),960);
+  assert.equal(size.next(500),1920);
+  size.observe({...empty,faces:[{status:'adjust',code:'too_small'}]},video,960);
+  assert.equal(size.next(510),1920);
+  size.observe({...empty,processing_ms:150},video,1920,3);
+  assert.equal(size.next(530),1920);
+});
+
+
+test('group capture uses the smallest face and restores full detail if anyone needs it',()=>{
+  const size=scheduling().captureSize(), video={videoWidth:1920,videoHeight:1080};
+  const near={status:'matched',box:[0,0,.5,.6],quality:{brightness:100,detection_score:.98}};
+  const far={...near,box:[.5,.2,.25,.3]};
+  size.next(0);
+  size.observe({faces:[near,far]},video);
+  assert.equal(size.next(200),960);
+  size.observe({faces:[near,{...far,quality:{brightness:30,detection_score:.99}}]},video);
+  assert.equal(size.next(210),1920);
+});
+
+test('a distant or blurred walk-by and its provisional match request full-detail captures',()=>{
+  const settings=scheduling().captureSize(), video={videoWidth:1920,videoHeight:1080};
+  settings.next(0);
+  for(const face of [
+    {status:'adjust',code:'too_small'}, {status:'adjust',code:'blurry'},
+    {status:'matched',box:[0,0,.5,.6],quality:{brightness:90,detection_score:.98},
+     attendance:{status:'confirming',confirmations:1}},
+  ]){
+    settings.observe({faces:[face]},video);
+    assert.equal(settings.next(100),1920);
+    assert.equal(settings.jpegQuality(),.9);
+  }
+  settings.observe({faces:[],code:'no_face'},video);
+  assert.equal(settings.jpegQuality(),.78);
 });

@@ -244,3 +244,25 @@ def test_attendance_session_index_optimizes_detail_and_movement_queries(tmp_path
             '''EXPLAIN QUERY PLAN SELECT m.*,r.name FROM attendance_movements m JOIN attendance_records r ON r.id=m.record_id
             WHERE r.session_id=? ORDER BY m.id DESC LIMIT 200''', (1,))]
         assert any('attendance_session' in step for step in movements_plan)
+
+
+def test_compact_overview_preserves_roster_and_negotiates_compression(setup, image):
+    import gzip
+    import json
+    client, headers, _, _ = setup
+    enroll(client, headers, image)
+    sid = start(client, headers).json['session']['id']
+    store = client.application.extensions['attendance'].store
+    with store.connect() as db:
+        db.executemany('INSERT INTO attendance_records(session_id,name) VALUES (?,?)',
+                       [(sid, f'Student {i}') for i in range(80)])
+    url = '/api/attendance/overview'
+    full = client.get(url).json
+    compact = client.get(url, query_string={'history':'compact'}).json
+    assert compact['session'] == full['session']
+    assert compact['sessions'] == [{key: row[key] for key in ('id','name','status','started_at')}
+                                   for row in full['sessions']]
+    zipped = client.get(url, query_string={'history':'compact'}, headers={'Accept-Encoding':'gzip'})
+    assert zipped.headers['Content-Encoding'] == 'gzip'
+    assert zipped.headers['Cache-Control'] == 'no-store'
+    assert json.loads(gzip.decompress(zipped.data)) == compact

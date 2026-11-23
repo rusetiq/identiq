@@ -1,13 +1,13 @@
 'use strict';
 window.IdentiqScan = (() => {
   let sample = null;
-  function delay(data, attendance, frameElapsedMs) {
+  function delay(data, attendance, frameElapsedMs, followsCamera = false) {
     const visible = data.face_count > 0 || !!data.box;
     const elapsed = Number.isFinite(frameElapsedMs) ? Math.max(0, frameElapsedMs) : 0;
-    if (!attendance) return Math.max(25, Math.ceil((visible ? 150 : 100) - elapsed));
+    if (!attendance) return followsCamera ? 0 : Math.max(25, Math.ceil((visible ? 80 : 100) - elapsed));
     // Keep searching promptly when faces are visible but not yet recognizable.
     if (!visible || Array.isArray(data.faces) && !data.faces.some(face => face.status === 'matched'))
-      return Math.max(25, Math.ceil(100 - elapsed));
+      return followsCamera ? 0 : Math.max(25, Math.ceil(100 - elapsed));
     const confirming = (data.faces || []).map(face => face.attendance)
       .filter(update => update?.status === 'confirming' && Number.isFinite(update.retry_after_ms));
     if (confirming.length && Number.isFinite(frameElapsedMs)) {
@@ -68,5 +68,69 @@ window.IdentiqScan = (() => {
       clear(){queues.clear();warmup=[];targets=[];},
     };
   }
-  return {delay, record, faceBuffer, last:() => sample ? {...sample} : null};
+  // Arm the callback at capture time so the camera and server can work in parallel.
+  function frameClock(video, signal) {
+    if (typeof video.requestVideoFrameCallback !== 'function') return null;
+    let callback = null, release = null, pending = null;
+    function reset() {
+      if (callback !== null) video.cancelVideoFrameCallback(callback);
+      callback = null;
+      release?.();
+      release = pending = null;
+    }
+    function captured() {
+      reset();
+      if (signal.aborted) return;
+      pending = new Promise(resolve => { release = resolve; });
+      callback = video.requestVideoFrameCallback(() => {
+        callback = null;
+        reset();
+      });
+    }
+    signal.addEventListener('abort', reset, {once:true});
+    return { captured, ready: () => pending, close() {
+      signal.removeEventListener('abort', reset);
+      reset();
+    }};
+  }
+  function captureSize() {
+    let size = 1920, lastFull = -Infinity, slowFullScan = false, needsDetail = false;
+    return {
+      observe(result, video, submittedSize, frameCount = 1) {
+        size = 1920;
+        const faces = result.faces || [result];
+        needsDetail = faces.some(face => face.attendance?.status === 'confirming' ||
+          ['too_small', 'blurry', 'low_light', 'uncertain_detection'].includes(face.code));
+        if (needsDetail) return;
+        if (submittedSize === 1920 && Number.isFinite(result.processing_ms))
+          slowFullScan = result.processing_ms / frameCount >= 80;
+        if (slowFullScan && result.code === 'no_face' && faces.length === 0) {
+          size = 960;
+          return;
+        }
+        if (!faces.length) return;
+        let pixels = Infinity;
+        for (const face of faces) {
+          if (face.status !== 'matched' || !face.box ||
+              !(face.quality?.brightness >= 55 && face.quality?.detection_score >= .9)) return;
+          pixels = Math.min(pixels, face.box[2] * video.videoWidth, face.box[3] * video.videoHeight);
+        }
+        const side = Math.max(video.videoWidth, video.videoHeight);
+        for (const candidate of [640, 960]) {
+          if (pixels * Math.min(1, candidate / side) >= 150) {
+            size = candidate;
+            break;
+          }
+        }
+      },
+      next(now) {
+        if (size < 1920 && now - lastFull < 500) return size;
+        lastFull = now;
+        return 1920;
+      },
+      jpegQuality() { return needsDetail ? .9 : .78; },
+      reset() { size = 1920; slowFullScan = false; needsDetail = false; },
+    };
+  }
+  return {delay, record, faceBuffer, frameClock, captureSize, last:() => sample ? {...sample} : null};
 })();

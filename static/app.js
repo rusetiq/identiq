@@ -8,7 +8,7 @@ const captureCanvas = document.createElement('canvas');
 const trackingCanvas = document.createElement('canvas');
 const liveTracker = new FaceTracker({
   video: $("video"), canvas: $("overlay"), capture: () => frame(trackingCanvas, 640, state.mode === 'enroll' ? .82 : .62),
-  request: image => apiFrame("/api/analyze", { image, group: state.mode === 'attendance' || state.mode === 'verify' && !$("person-select").value }), onUpdate: updateControls, guide: () => state.mode === "attendance" && state.activeAttendance && state.movementMode === "automatic" ? { axis: $("crossing-axis").value, direction: $("entry-direction").value } : null, pause: () => document.hidden || state.savingEnrollment || state.scanning && (state.scanSessionId || !$("person-select").value)
+  request: image => apiFrame("/api/analyze", { image, group: state.mode === 'attendance' || state.mode === 'verify' && !$("person-select").value }), onUpdate: updateCaptureControl, guide: () => state.mode === "attendance" && state.activeAttendance && state.movementMode === "automatic" ? { axis: $("crossing-axis").value, direction: $("entry-direction").value } : null, pause: () => document.hidden || state.savingEnrollment || state.scanning
 });
 let cancelEnrollment = false;
 const recentCheckIns = new Map();
@@ -122,6 +122,10 @@ async function api(path, method = "GET", data, signal, refreshed = false, frameU
   }
 }
 
+function updateCaptureControl() {
+  $("capture").disabled = !state.stream || !state.ready || state.enrolling || liveTracker.readyStreak < 2 || !$("enroll-person").value;
+}
+
 function updateControls() {
   $("attendance-flow").disabled = $("fullscreen-flow").disabled = state.enrolling || state.attendanceBusy;
   $("fullscreen-flow").value = $("attendance-flow").value = state.movementMode;
@@ -139,7 +143,7 @@ function updateControls() {
   $("end-session").disabled = state.attendanceBusy || state.enrolling;
   $("attendance-tab").disabled = state.enrolling;
   $("recognize").disabled = !state.stream || !state.ready || !state.people.some(person => person.compatible_samples > 0) || state.enrolling;
-  $("capture").disabled = !state.stream || !state.ready || state.enrolling || liveTracker.readyStreak < 2 || !$("enroll-person").value;
+  updateCaptureControl();
   $("stop-camera").disabled = !state.stream && !state.cameraStarting;
   $("stop-camera").textContent = state.cameraStarting && !state.stream ? "Cancel connection" : "Turn off camera";
   $("start-camera").disabled = !!state.stream || state.cameraStarting;
@@ -244,6 +248,7 @@ function stopScan() {
   state.scanAbort?.abort(); state.scanAbort = null;
   state.scanning = false; cameraWakeLock?.release().catch(() => { }); cameraWakeLock = null;
   state.scanSessionId = null;
+  showGroupResults.lastPass = null;
   state.generation++;
   state.streak = 0;
   state.candidate = null;
@@ -332,12 +337,47 @@ async function refreshPeople() {
 }
 window.addEventListener('database-merged', () => refreshPeople().catch(error => toast(error.message)));
 
+function createWalkbyLog() {
+  const list = $("walkby-events");
+  const clock = new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3,
+  });
+  let session, pass = 0, previous = '', firstCapture = 0;
+  return {
+    start(id) {
+      if (session !== id) {
+        list.replaceChildren();
+        session = id;
+        pass = 0;
+      }
+      previous = '';
+    },
+    record(capturedAt, lines, movementSaved = false) {
+      const message = lines.join(' · ');
+      if (message === previous) return;
+      if (!previous) {
+        pass++;
+        firstCapture = capturedAt;
+      }
+      previous = message;
+      const row = document.createElement('li');
+      const time = clock.format(performance.timeOrigin + capturedAt);
+      row.textContent = `${time} · Pass ${pass} · ${message || 'No face in frame'}`;
+      if (movementSaved) row.textContent += ` · ${Math.round(performance.now() - firstCapture)} ms from first visible frame to saved response`;
+      list.prepend(row);
+      if (list.children.length > 100) list.lastElementChild.remove();
+    },
+  };
+}
+const walkbyLog = createWalkbyLog();
+
 async function scan(attendanceSessionId = null, sharedExecution = false) {
   if (attendanceSessionId && !sharedExecution && window.sharedRoom) return window.sharedRoom.toggleScan();
   if (state.scanning) { const attendanceScan = !!state.scanSessionId; stopScan(); result(attendanceScan ? "Attendance scan paused" : "Recognition paused", "Start again when you’re ready."); return; }
   state.scanning = true; maintainCameraAwake();
   const scanAbort = new AbortController(); state.scanAbort = scanAbort;
   state.scanSessionId = attendanceSessionId;
+  if (attendanceSessionId) walkbyLog.start(attendanceSessionId);
   const scannerId = sharedExecution ? window.sharedRoom.snapshot.scanner_id : crypto.randomUUID();
   const sharedContext = sharedExecution ? window.sharedRoom.scanContext() : {};
   const group = !!attendanceSessionId || !$("person-select").value;
@@ -346,13 +386,21 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
   let failures = 0;
   const attendancePayload = (image, captureAgeMs) => ({ image, capture_age_ms: captureAgeMs, person_id: null, ...sharedContext, attendance_session_id: attendanceSessionId, scanner_id: scannerId, attendance_action: state.movementMode, crossing_axis: $("crossing-axis").value, entry_direction: $("entry-direction").value });
   // Retain camera detail for smaller faces; frame() never upscales the source.
-  const recognitionFrame = () => frame(captureCanvas, 1920, .78, true);
+  const captureSize = window.IdentiqScan.captureSize();
   // Capture while inference runs so a walking person can still be confirmed.
   // Keep a small, chronological, in-memory buffer and discard old images.
   const pendingFrames = window.IdentiqScan.faceBuffer(); let lastCapturedAt = -Infinity;
-  const captureFresh = () => { const capturedAt = performance.now(), image = recognitionFrame(); lastCapturedAt = capturedAt; return { image, capturedAt }; };
+  const frameClock = window.IdentiqScan.frameClock($('video'), scanAbort.signal);
+  const captureFresh = () => {
+    const capturedAt = performance.now();
+    const maxSide = captureSize.next(capturedAt);
+    const image = frame(captureCanvas, maxSide, captureSize.jpegQuality(), true);
+    frameClock?.captured();
+    lastCapturedAt = capturedAt;
+    return {image, capturedAt, maxSide};
+  };
   let bufferEncoding = false;
-  const captureIntervalMs = state.attendanceCaptureIntervalMs || 300;
+  const captureIntervalMs = state.attendanceCaptureIntervalMs || 205;
   const bufferTimer = attendanceSessionId ? setInterval(async () => {
     if (bufferEncoding || !state.scanning || generation !== state.generation || !state.stream || connectionIssues.has('api')) return;
     const now = performance.now();
@@ -388,7 +436,11 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
         const selected = $("person-select").value;
         let captured;
         if (attendanceSessionId) captured = pendingFrames.take(performance.now());
-        if (!captured) { pendingFrames.clear(); captured = captureFresh(); }
+        if (!captured) {
+          await frameClock?.ready();
+          if (!state.scanning || generation !== state.generation) break;
+          captured = pendingFrames.take(performance.now()) || captureFresh();
+        }
         capturedAt = captured.capturedAt;
         const dequeueAt = performance.now();
         const captures = [captured];
@@ -415,16 +467,17 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
         if (!state.scanning || generation !== state.generation) break;
         const scans = response.scans || [response];
         const data = scans.at(-1);
+        captureSize.observe(data, $("video"), captures.at(-1).maxSide, scans.length);
         window.IdentiqScan?.record(data, performance.now() - requestStarted);
-        nextScanDelay = window.IdentiqScan?.delay(data, !!attendanceSessionId, performance.now() - captures.at(-1).capturedAt) ?? nextScanDelay;
+        nextScanDelay = window.IdentiqScan?.delay(data, !!attendanceSessionId, performance.now() - captures.at(-1).capturedAt, !!frameClock) ?? nextScanDelay;
         state.matchThreshold = data.threshold;
         failures = 0;
         if (group) {
           for (const [index, scan] of scans.entries()) {
             if (!state.scanning || generation !== state.generation) break;
             const frame = captures[index];
-            liveTracker.accept(scan, images[index], frame.capturedAt);
-            await showGroupResults(scan, groupStreaks, attendanceSessionId);
+            liveTracker.accept(scan, images[index], frame.capturedAt, false);
+            await showGroupResults(scan, groupStreaks, attendanceSessionId, frame.capturedAt);
           }
           if (!state.scanning || generation !== state.generation) break;
           if (attendanceSessionId) pendingFrames.accept(data.faces, performance.now());
@@ -432,6 +485,8 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
           if (delay) await sleep(delay);
           continue;
         }
+        liveTracker.accept({status: 'ready', face_count: 1, box: data.box, landmarks: data.landmarks,
+          quality: data.quality, message: data.message}, image, capturedAt, false);
         if (data.status === "matched") {
           state.streak = state.candidate === data.person.id ? state.streak + 1 : 1;
           state.candidate = data.person.id;
@@ -448,6 +503,7 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
       } catch (error) {
         if (!state.scanning || generation !== state.generation) break;
         pendingFrames.clear();
+        captureSize.reset();
         if (transientError(error)) {
           if (attendanceSessionId && recognitionPayload && !sharedExecution) {
             recognitionPayload.capture_age_ms = Math.max(0, performance.now() - capturedAt);
@@ -460,23 +516,28 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
         if (error.code === 'shared_scan_stopped') { stopScan(); result("Shared scan paused", "Shared controls paused or changed the scan."); break; }
         state.streak = 0; state.candidate = null; clearBox();
         groupStreaks.clear(); showCameraNames([]); $("scan-face-results").replaceChildren(); $("scan-face-results").hidden = true;
+        if (!group && capturedAt !== null)
+          liveTracker.accept({status: 'adjust', face_count: 0, message: error.message}, null, capturedAt);
         result("Adjust your camera view", error.message, "warning");
+        if (frameClock) nextScanDelay = 0;
         if (!["no_face", "multiple_faces", "blurry", "low_light", "too_small", "uncertain_detection", "quality"].includes(error.code)) { stopScan(); toast(error.message); break; }
       }
-      await sleep(nextScanDelay);
+      if (nextScanDelay) await sleep(nextScanDelay);
     }
   } finally {
+    frameClock?.close();
     if (bufferTimer) clearInterval(bufferTimer);
     if (offlineTimer) clearInterval(offlineTimer);
     pendingFrames.clear();
   }
 }
 
-async function showGroupResults(data, streaks, sessionId) {
+async function showGroupResults(data, streaks, sessionId, capturedAt) {
   const holder = $("scan-face-results"); holder.replaceChildren(); holder.hidden = true;
   const seen = new Set(data.faces.filter(face => face.status === 'matched').map(face => face.person.id));
   for (const id of streaks.keys()) if (!seen.has(id)) streaks.delete(id);
-  let confirmed = 0, confirming = 0; const newlyPresent = [], highlights = [];
+  let confirmed = 0, confirming = 0; const newlyPresent = [], alreadyPresent = [], provisional = [], highlights = [], cameraNames = [];
+  const logLines = [];
   const labels = {
     low_light: 'Low light', blurry: 'Blurry face', too_small: 'Face too far away',
     uncertain_detection: 'Face unclear', ambiguous: 'Uncertain match',
@@ -495,29 +556,60 @@ async function showGroupResults(data, streaks, sessionId) {
       else detail = face.attendance.status === 'manual_override' ? `Staff marked ${face.attendance.attendance_status}. Camera status kept unchanged.` : face.attendance.message;
       if (!matched) {
         if (sessionId && face.attendance?.status === 'confirming') {
-          detail = `Provisional match · ${face.attendance.confirmations} of ${face.attendance.required_confirmations} confirmations · not marked present yet`;
+          detail = `Provisional match · ${face.attendance.confirmations} of ${face.attendance.required_confirmations} confirmations · ${face.attendance.attendance_status === 'present' ? 'already marked present in this session' : 'waiting to confirm'}`;
+          provisional.push({name, count:face.attendance.confirmations,
+            required:face.attendance.required_confirmations, present:face.attendance.attendance_status === 'present'});
         } else if (sessionId && face.attendance?.status === 'tracking') {
           detail = 'Identity confirmed · cross the line to record movement';
         } else if (!sessionId) {
           detail = `Provisional match · ${streaks.get(face.person.id)} of 3 fresh matches`;
         } else name = 'Face needs review';
       }
+      if (sessionId && face.attendance.status === 'present' && !face.attendance.newly_moved &&
+          face.attendance.campus_state === 'on_campus') {
+        detail = 'Already checked in for this session';
+        alreadyPresent.push(name);
+      }
       if (face.attendance?.newly_moved || face.attendance?.newly_present) newlyPresent.push(`${name} ${face.attendance.action === 'check_out' ? 'checked out' : 'checked in'}`);
+    }
+    if (sessionId) {
+      const movement = face.attendance;
+      const outcome = movement?.newly_moved || movement?.newly_present
+        ? (movement.action === 'check_out' ? 'Check-out saved' : 'Check-in saved')
+        : movement?.status === 'confirming' ? detail : movement?.message || detail;
+      logLines.push(face.person ? `${face.person.name} · ${outcome}` : name);
     }
     const row = document.createElement('div'); row.className = `scan-face-row ${matched ? 'confirmed' : face.status === 'matched' ? 'confirming' : 'warning'}`;
     const title = document.createElement('strong'); title.textContent = name; const text = document.createElement('span'); text.textContent = detail;
-    if (face.person) row.dataset.personId = face.person.id;
+    cameraNames.push({ id: face.person?.id, name, detail, matched });
     row.append(title, text); holder.append(row); highlights.push({ box: face.box, matched, status: face.status, label: name });
   }
+  if (sessionId) walkbyLog.record(capturedAt, logLines, newlyPresent.length > 0);
   holder.hidden = !holder.children.length;
-  showCameraNames(Array.from(holder.children).map(row => ({ id: row.dataset.personId, name: row.querySelector("strong").textContent, detail: row.querySelector("span").textContent, matched: row.classList.contains("confirmed") })), sessionId);
+  showCameraNames(cameraNames, sessionId);
   liveTracker.highlightGroup(highlights);
   const visible = holder.children.length;
-  result(visible ? `${confirmed} ${sessionId ? 'movement records' : 'recognized'}` : 'Ready for the next person', visible ? `${confirming} confirming · ${visible - confirmed - confirming} need review` : state.movementMode === 'automatic' ? 'Waiting for an enrolled person to cross the line.' : 'Waiting for an enrolled person.', confirmed ? 'matched' : '');
-  if (newlyPresent.length) showGroupResults.lastMovement = { sessionId, text: newlyPresent.join(', '), at: performance.now() };
-  const lastMovement = showGroupResults.lastMovement;
-  if (sessionId && lastMovement?.sessionId === sessionId && performance.now() - lastMovement.at < 5000)
-    result(lastMovement.text, 'Attendance saved. Ready for the next person.', 'matched');
+  result(visible ? `${confirmed} ${sessionId ? 'confirmed' : 'recognized'}` : 'Ready for the next person', visible ? `${confirming} confirming · ${visible - confirmed - confirming} need review` : state.movementMode === 'automatic' ? 'Waiting for an enrolled person to cross the line.' : 'Waiting for an enrolled person.', confirmed ? 'matched' : '');
+  if (newlyPresent.length || alreadyPresent.length) {
+    showGroupResults.lastPass = {
+      sessionId, at: performance.now(),
+      text: newlyPresent.length ? newlyPresent.join(', ') : alreadyPresent.join(', '),
+      detail: newlyPresent.length ? 'Attendance saved. Ready for the next person.' : 'Already checked in for this session.',
+    };
+  }
+  if (!newlyPresent.length && !alreadyPresent.length && provisional.length === 1) {
+    const pass = provisional[0];
+    showGroupResults.lastPass = {
+      sessionId, at: performance.now(), text: pass.name, incomplete: true,
+      detail: `Last pass had ${pass.count} of ${pass.required} confirming frames. ${pass.present ? 'Already marked present in this session.' : 'No check-in saved.'}`,
+    };
+  } else if (seen.size && !newlyPresent.length && !alreadyPresent.length) {
+    showGroupResults.lastPass = null;
+  }
+  const lastPass = showGroupResults.lastPass;
+  if (sessionId && (!visible || newlyPresent.length || alreadyPresent.length) &&
+      lastPass?.sessionId === sessionId && performance.now() - lastPass.at < 5000)
+    result(lastPass.text, lastPass.detail, lastPass.incomplete ? 'warning' : 'matched');
   if (newlyPresent.length) { toast(newlyPresent.join(', ')); refreshAttendance(sessionId).catch(error => { if (!transientError(error)) toast(error.message); }); }
 }
 
@@ -668,12 +760,12 @@ async function maintainCameraAwake() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) maintainCameraAwake(); });
 async function initializeApp() {
   $("camera-dot").classList.add("off");
-  await refreshOfflineQueue();
   try {
-    const status = await api("/api/status"); state.ready = status.models_ready;
+    const [status] = await Promise.all([
+      api("/api/status"), refreshPeople(), refreshAttendance(), refreshOfflineQueue(),
+    ]);
+    state.ready = status.models_ready;
     state.attendanceCaptureIntervalMs = status.attendance_capture_interval_ms;
-    await refreshPeople();
-    await refreshAttendance();
     if (!state.ready) { toast("Face models are missing. Run python scripts/download_models.py."); result("Setup needed", "Download the face models, then reload this page.", "warning"); }
     else if (status.reenrollment_required) { result("Re-enrollment required", `${status.reenrollment_required} profile${status.reenrollment_required === 1 ? '' : 's'} still use the previous model. Select each profile and enroll new face samples before scanning.`, "warning"); }
     else if (state.activeAttendance) result("Session in progress", "Enable the camera and start attendance scan to continue.");
@@ -684,7 +776,6 @@ async function initializeApp() {
   }
   updateControls();
 }
-initializeApp();
 window.addEventListener('online', () => { renderConnectionStatus(); setTimeout(() => syncOfflineAttendance(), 500); });
 window.addEventListener('offline', renderConnectionStatus);
 
@@ -748,7 +839,7 @@ let attendanceRequest = 0, attendanceSignature = '', attendancePolling = false;
 async function refreshAttendance(preferredId = null) {
   const requestId = ++attendanceRequest;
   const viewedId = preferredId ?? state.viewedAttendance?.id;
-  const { sessions, session: detail } = await api('/api/attendance/overview' + (viewedId ? `?session_id=${viewedId}` : ''));
+  const { sessions, session: detail } = await api('/api/attendance/overview?history=compact' + (viewedId ? `&session_id=${viewedId}` : ''));
   if (requestId !== attendanceRequest) return;
   state.attendanceSessionCount = sessions.length;
   state.activeAttendance = sessions.find(session => session.status === 'active') || null;
@@ -773,41 +864,75 @@ async function refreshAttendance(preferredId = null) {
   if (detail) { $('count-on-campus').textContent = detail.movement_counts.on_campus; $('count-checked-out').textContent = detail.movement_counts.checked_out; $('count-location-unknown').textContent = detail.movement_counts.unknown; }
   renderMovementLog(detail);
   renderRoster(detail);
-  updateControls();
+}
+
+const rosterTime = new Intl.DateTimeFormat(undefined, {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+function rosterRow(session, person) {
+  const row = document.createElement('tr'); row.dataset.recordId = person.id;
+  const name = document.createElement('td'); name.textContent = person.name;
+  const source = document.createElement('span'); source.className = 'attendance-source'; source.textContent = person.method === 'manual' ? 'Staff recorded' : person.method === 'camera' ? 'Camera check-in' : person.person_id === null ? 'Enrollment removed' : '';
+  const school = document.createElement('span'); school.className = 'attendance-source'; school.textContent = [person.student_id || person.employee_code, person.class_name, person.academic_year].filter(Boolean).join(' · '); name.append(school, source);
+  const status = document.createElement('td'); const select = document.createElement('select'); select.className = person.status; select.setAttribute('aria-label', `Attendance for ${person.name}`);
+  for (const [value, label] of [['present', 'Present'], ['absent', 'Absent'], ...(session.status === 'active' ? [['pending', 'Not seen yet']] : [])]) select.add(new Option(label, value));
+  select.value = person.status;
+  select.onchange = () => {
+    const requested = select.value;
+    select.value = person.status;
+    correctAttendance(session.id, person.id, requested);
+  };
+  status.append(select);
+  const seen = timestamp => timestamp ? rosterTime.format(new Date(timestamp)) : '—';
+  const first = document.createElement('td'); first.className = 'attendance-time'; first.textContent = seen(person.checked_in_at);
+  const last = document.createElement('td'); last.className = 'attendance-time'; last.textContent = seen(person.checked_out_at);
+  const campus = document.createElement('td'); campus.textContent = ({ on_campus: 'Checked in', checked_out: 'Checked out', unknown: 'Not recorded', not_arrived: 'Not arrived' })[person.campus_state];
+  const actions = document.createElement('td'); actions.className = 'movement-actions';
+  for (const [action, label] of [['check_in', 'Check in'], ['check_out', 'Check out']]) { const button = document.createElement('button'); button.className = 'text-button'; button.textContent = label; button.setAttribute('aria-label', `${label} ${person.name}`); button.dataset.unavailable = String(session.status !== 'active' || (action === 'check_in' ? person.campus_state === 'on_campus' : person.campus_state !== 'on_campus')); button.disabled = button.dataset.unavailable === 'true'; button.onclick = () => askStaffMovement(session, person, action); actions.append(button); }
+  row.append(name, status, first, last, campus, actions);
+  return row;
 }
 
 function renderRoster(detail = state.viewedAttendance) {
-  $('attendance-roster').replaceChildren();
+  const holder = $('attendance-roster');
   if (!detail) {
+    holder.replaceChildren();
     const empty = document.createElement('p'); empty.className = 'directory-empty'; empty.textContent = 'Start a session to see the attendance roster.'; $('attendance-roster').append(empty);
   } else {
     for (const status of ['present', 'pending', 'absent']) $(`count-${status}`).textContent = detail.counts[status];
     $('export-attendance').href = `/api/attendance/sessions/${detail.id}/export.csv`;
-    const table = document.createElement('table'); table.className = 'attendance-table'; table.setAttribute('aria-label', 'Attendance roster');
-    const head = document.createElement('thead'); head.innerHTML = '<tr><th>Person</th><th>Status</th><th>Check-in</th><th>Check-out</th><th>Campus record</th><th>Staff action</th></tr>'; table.append(head);
-    const body = document.createElement('tbody');
+    let body = holder.querySelector('tbody');
+    if (!body || body.dataset.sessionId !== String(detail.id)) {
+      const table = document.createElement('table'); table.className = 'attendance-table'; table.setAttribute('aria-label', 'Attendance roster');
+      const head = document.createElement('thead'); head.innerHTML = '<tr><th>Person</th><th>Status</th><th>Check-in</th><th>Check-out</th><th>Campus record</th><th>Staff action</th></tr>'; table.append(head);
+      body = document.createElement('tbody');
+      body.dataset.sessionId = detail.id;
+      table.append(body);
+      holder.replaceChildren(table);
+    }
     const query = $('roster-search').value.trim().toLocaleLowerCase(), filter = $('roster-filter').value;
     const visible = detail.roster.filter(person => (!query || [person.name, person.student_id, person.employee_code, person.class_name, person.academic_year].join(' ').toLocaleLowerCase().includes(query)) && (!filter || person.status === filter));
     $('roster-matches').textContent = `${visible.length} of ${detail.roster.length} people`;
-    for (const person of visible) {
-      const row = document.createElement('tr'); row.dataset.recordId = person.id;
-      const name = document.createElement('td'); name.textContent = person.name;
-      const source = document.createElement('span'); source.className = 'attendance-source'; source.textContent = person.method === 'manual' ? 'Staff recorded' : person.method === 'camera' ? 'Camera check-in' : person.person_id === null ? 'Enrollment removed' : '';
-      const school = document.createElement('span'); school.className = 'attendance-source'; school.textContent = [person.student_id || person.employee_code, person.class_name, person.academic_year].filter(Boolean).join(' · '); name.append(school, source);
-      const status = document.createElement('td'); const select = document.createElement('select'); select.className = person.status; select.setAttribute('aria-label', `Attendance for ${person.name}`);
-      for (const [value, label] of [['present', 'Present'], ['absent', 'Absent'], ...(detail.status === 'active' ? [['pending', 'Not seen yet']] : [])]) select.add(new Option(label, value));
-      select.value = person.status; select.onchange = () => correctAttendance(detail.id, person.id, select.value);
-      status.append(select);
-      const seen = timestamp => timestamp ? new Date(timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
-      const first = document.createElement('td'); first.className = 'attendance-time'; first.textContent = seen(person.checked_in_at);
-      const last = document.createElement('td'); last.className = 'attendance-time'; last.textContent = seen(person.checked_out_at);
-      const campus = document.createElement('td'); campus.textContent = ({ on_campus: 'Checked in', checked_out: 'Checked out', unknown: 'Not recorded', not_arrived: 'Not arrived' })[person.campus_state];
-      const actions = document.createElement('td'); actions.className = 'movement-actions';
-      for (const [action, label] of [['check_in', 'Check in'], ['check_out', 'Check out']]) { const button = document.createElement('button'); button.className = 'text-button'; button.textContent = label; button.setAttribute('aria-label', `${label} ${person.name}`); button.dataset.unavailable = String(detail.status !== 'active' || (action === 'check_in' ? person.campus_state === 'on_campus' : person.campus_state !== 'on_campus')); button.disabled = button.dataset.unavailable === 'true'; button.onclick = () => askStaffMovement(detail, person, action); actions.append(button); }
-      row.append(name, status, first, last, campus, actions); body.append(row);
+    const session = {id: detail.id, name: detail.name, status: detail.status};
+    const previous = new Map(Array.from(body.rows, row => [row.dataset.recordId, row]));
+    const visibleIds = new Set(visible.map(person => String(person.id)));
+    for (const [id, row] of previous) if (!visibleIds.has(id)) row.remove();
+    for (const [index, person] of visible.entries()) {
+      const id = String(person.id);
+      const signature = JSON.stringify([session.name, session.status, person]);
+      let row = previous.get(id);
+      if (row?.rosterSignature !== signature) {
+        const replacement = rosterRow(session, person);
+        replacement.rosterSignature = signature;
+        row?.replaceWith(replacement);
+        row = replacement;
+      }
+      const next = body.rows[index];
+      if (row !== next) body.insertBefore(row, next || null);
     }
-    if (!visible.length) { const row = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 6; cell.textContent = 'No people match your filters.'; row.append(cell); body.append(row); }
-    table.append(body); $('attendance-roster').append(table);
+    if (!visible.length) {
+      const row = body.insertRow(), cell = row.insertCell();
+      cell.colSpan = 6;
+      cell.textContent = 'No people match your filters.';
+    }
   }
   updateControls();
 }
@@ -914,3 +1039,5 @@ $('staff-movement-form').onsubmit = async event => {
 
 $('iphone-target').onchange = updateControls;
 $('session-type').onchange = () => { const staff = $('session-type').value === 'staff'; $('session-class').disabled = $('session-year').disabled = staff; if (staff) { $('session-class').value = ''; $('session-year').value = ''; } };
+
+initializeApp();

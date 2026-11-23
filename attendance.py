@@ -15,7 +15,7 @@ from attendance_policy import (MATCH_THRESHOLD, MATCH_MARGIN, CONFIRMATIONS,
 
 
 class Attendance:
-    def __init__(self, store, clock=time.monotonic, *, fast_confirmation=False):
+    def __init__(self, store, clock=time.monotonic, *, fast_confirmation=True):
         self.store = store
         self.clock = clock
         self.min_interval = .19 if fast_confirmation else MIN_INTERVAL
@@ -25,16 +25,21 @@ class Attendance:
         self.crossings = {}
         self.frames = {}
 
-    def sessions(self):
+    def sessions(self, *, include_counts=True):
         with self.store.connect() as db:
-            return [dict(row) for row in db.execute("""
-                SELECT s.*, count(r.id) AS total,
-                    coalesce(sum(r.status='present'),0) AS present,
-                    coalesce(sum(r.status='absent'),0) AS absent,
-                    coalesce(sum(r.status='pending'),0) AS pending
-                FROM attendance_sessions s LEFT JOIN attendance_records r ON r.session_id=s.id
-                GROUP BY s.id ORDER BY s.id DESC
+            if not include_counts:
+                return [dict(row) for row in db.execute(
+                    "SELECT id,name,status,started_at FROM attendance_sessions ORDER BY id DESC")]
+            sessions = [dict(row) for row in db.execute("""
+                SELECT s.*,
+                    (SELECT count(*) FROM attendance_records WHERE session_id=s.id AND status='present') AS present,
+                    (SELECT count(*) FROM attendance_records WHERE session_id=s.id AND status='absent') AS absent,
+                    (SELECT count(*) FROM attendance_records WHERE session_id=s.id AND status='pending') AS pending
+                FROM attendance_sessions s ORDER BY s.id DESC
             """)]
+        for session in sessions:
+            session['total'] = session['present'] + session['absent'] + session['pending']
+        return sessions
 
     def active_session_id(self):
         """Fetch active session ID using indexed single-row lookup instead of full history JOIN."""
@@ -288,7 +293,9 @@ class Attendance:
             # Check before pruning identities: a late frame must not erase newer evidence.
             if last and captured_at < last['captured_at']:
                 return [self.outcome('stale_frame', message='Discarded an out-of-order camera frame.') for _ in recognitions]
-            if (not isinstance(frame_id,str) or len(frame_id) != 64 or
+            needs_fingerprint = any(item['status'] == 'matched' for item in recognitions)
+            invalid_fingerprint = needs_fingerprint and (not isinstance(frame_id, str) or len(frame_id) != 64)
+            if (invalid_fingerprint or
                     not 0 <= now-received_at <= MAX_FRAME_AGE or
                     not 0 <= now-captured_at <= MAX_FRAME_AGE):
                 self.reset(session_id, scanner_id, received_at=received_at)
@@ -353,7 +360,7 @@ class Attendance:
                           'checked_out' if action == 'check_out' and row['campus_state'] == 'checked_out' else 'confirming')
                 return self.outcome(status, evidence['count'], campus_state=row['campus_state'],
                                     message='Identity already confirmed. No new movement saved.')
-            return self.outcome('confirming', evidence['count'], message='Waiting for the next fresh confirmation frame.',
+            return self.outcome('confirming', evidence['count'], attendance_status=row['status'], message='Waiting for the next fresh confirmation frame.',
                                 retry_after_ms=self.confirmation_delay(evidence,now))
         evidence = {**evidence, 'count':min(CONFIRMATIONS, evidence['count']+1), 'time':now,
                     'frames':[*evidence['frames'][-7:], frame_id], 'box':recognition['box'],
@@ -366,7 +373,7 @@ class Attendance:
             self.sightings.pop(next(iter(self.sightings)))
         self.sightings[key] = evidence
         if evidence['count'] < CONFIRMATIONS or now-evidence['started'] < self.min_duration:
-            return self.outcome('confirming', evidence['count'], message='Confirming the same identity across fresh, clear camera frames.',
+            return self.outcome('confirming', evidence['count'], attendance_status=row['status'], message='Confirming the same identity across fresh, clear camera frames.',
                                 retry_after_ms=self.confirmation_delay(evidence,now))
         evidence['confirmed'] = True
         movement = evidence['movement'] if action == 'automatic' else action

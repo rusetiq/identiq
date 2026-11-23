@@ -107,6 +107,8 @@ def _cpu_recognizer(model_path):
     options.intra_op_num_threads = max(1, min(4, (os.cpu_count() or 1) // 2))
     options.inter_op_num_threads = 1
     options.add_session_config_entry('session.intra_op.allow_spinning', '0')
+    # Each ArcFace invocation receives one aligned crop, including group scans.
+    options.add_free_dimension_override_by_name('None', 1)
     return ort.InferenceSession(str(model_path), sess_options=options,
                                 providers=['CPUExecutionProvider'])
 
@@ -151,8 +153,12 @@ def _recognizer_for_device(model_path, cache_root):
 class FaceEngine:
     def __init__(self, model_dir):
         self._detector_lock = threading.Lock()
-        self.detector = cv2.FaceDetectorYN.create(
-            str(model_dir / "face_detection_yunet_2023mar.onnx"), "", (640, 480), 0.75, 0.3, max(80, MAX_FACES * 4))
+        self._detail_lock = threading.Lock()
+        detector_args = (str(model_dir / "face_detection_yunet_2023mar.onnx"),
+                         "", (640, 480), 0.75, 0.3, max(80, MAX_FACES * 4))
+        self.detector = cv2.FaceDetectorYN.create(*detector_args)
+        # YuNet can reuse its inference buffers across scans of the same size.
+        self.detail_detector = cv2.FaceDetectorYN.create(*detector_args)
         model_path = model_dir / "arcface_w600k_r50.onnx"
         if not model_path.is_file():
             raise FaceError("models_missing", "Install the research face model: python scripts/download_models.py")
@@ -229,9 +235,11 @@ class FaceEngine:
         detector_image = cv2.resize(image, (round(width * scale), round(height * scale))) if scale < 1 else image
         # YuNet stores the input size on the detector. Keep sizing and
         # detection together, then release it before quality checks or ArcFace.
-        with self._detector_lock:
-            self.detector.setInputSize((detector_image.shape[1], detector_image.shape[0]))
-            _, faces = self.detector.detect(detector_image)
+        detector, lock = ((self.detail_detector, self._detail_lock) if max_side > 960
+                          else (self.detector, self._detector_lock))
+        with lock:
+            detector.setInputSize((detector_image.shape[1], detector_image.shape[0]))
+            _, faces = detector.detect(detector_image)
             if faces is None:
                 return np.empty((0, 15), dtype=np.float32)
             faces = faces.copy()
@@ -298,7 +306,9 @@ class FaceEngine:
         if crop.shape[:2] != (128, 128):
             crop = cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA)
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        # The four-neighbor kernel on uint8 fits exactly in signed 16 bits.
+        laplacian = cv2.Laplacian(gray, cv2.CV_16S)
+        sharpness = float(cv2.meanStdDev(laplacian)[1][0, 0]) ** 2
         brightness = cv2.mean(gray)[0]
         quality["sharpness"] = round(sharpness, 1)
         quality["brightness"] = round(brightness, 1)
@@ -469,6 +479,7 @@ class Store:
                 CREATE INDEX IF NOT EXISTS attendance_person_session ON attendance_records(person_id,session_id DESC);
                 -- Index session_id on attendance_records to accelerate session detail and movement join queries (~3.9x speedup)
                 CREATE INDEX IF NOT EXISTS attendance_session ON attendance_records(session_id);
+                CREATE INDEX IF NOT EXISTS attendance_session_status ON attendance_records(session_id,status);
                 CREATE TABLE IF NOT EXISTS identity_revision (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
                 INSERT OR IGNORE INTO identity_revision VALUES(1,0);
             """)
@@ -570,10 +581,8 @@ class Store:
             except sqlite3.IntegrityError as error:raise FaceError('duplicate_student_id','That student ID is already assigned.') from error
         return self.person(person_id)
 
-    def candidates_batch(self, embeddings, top_two=False):
-        """One version-checked snapshot and one matrix multiplication for a frame."""
-        if not len(embeddings):
-            return []
+    def identity_snapshot(self):
+        """Return the current revision, identities and scoring matrix."""
         with self.lock, self.connect() as db:
             db.execute('BEGIN')
             revision = db.execute('SELECT value FROM identity_revision WHERE id=1').fetchone()[0]
@@ -589,7 +598,13 @@ class Store:
                 matrix = np.asarray([np.mean(person['vectors'],axis=0,dtype=np.float32) for person in grouped.values()],dtype=np.float32).reshape((-1,EMBEDDING_DIMENSION))
                 matrix.setflags(write=False)
                 self._identity_cache = (revision, people, matrix)
-            _, people, matrix = self._identity_cache
+            return self._identity_cache
+
+    def candidates_batch(self, embeddings, top_two=False):
+        """One version-checked snapshot and one matrix multiplication for a frame."""
+        if not len(embeddings):
+            return []
+        _, people, matrix = self.identity_snapshot()
         if not people:
             return [[] for _ in embeddings]
         scores = np.asarray(embeddings,dtype=np.float32) @ matrix.T

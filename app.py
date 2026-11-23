@@ -49,7 +49,7 @@ class _QuietDisconnectFilter(logging.Filter):
 logging.getLogger("werkzeug").addFilter(_QuietDisconnectFilter())
 
 
-def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmation=False):
+def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmation=True):
     app = Flask(__name__)
     running_build=installed_build()
     assets = WebAssets(ROOT/'static',running_build)
@@ -89,6 +89,16 @@ def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmat
     def models_ready():
         return engine is not None or all((ROOT / "models" / name).is_file() for name in (
             "face_detection_yunet_2023mar.onnx", "arcface_w600k_r50.onnx"))
+
+    def prepare_scanner():
+        try:
+            get_engine()
+            store.identity_snapshot()
+        except Exception:
+            app.logger.exception("Scanner warmup failed. The next scan will retry.")
+
+    if engine is None and models_ready():
+        threading.Thread(target=prepare_scanner, name="scanner-warmup", daemon=True).start()
 
     def log_match_diagnostic(recognition):
         diagnostic = recognition.get('match_diagnostics')
@@ -488,11 +498,8 @@ def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmat
             with shared.lock:shared.guard(data)
         try:
             frame = decode_frame(data.get('image'))
-            if session_id is not None:
-                vector, analysis = get_engine().extract_with_quality(frame, attendance=True)
-                box = analysis['box']
-            else:
-                vector, box = get_engine().extract(frame)
+            vector, analysis = get_engine().extract_with_quality(frame, attendance=session_id is not None)
+            box = analysis['box']
             recognition = identify(store, vector, claimed_id)
             log_match_diagnostic(recognition)
         except FaceError:
@@ -507,7 +514,7 @@ def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmat
                 tracking=attendance.observe(session_id,scanner_id,{**recognition,'box':box,'quality':analysis.get('quality',{})},action=data.get('attendance_action','check_in'),axis=data.get('crossing_axis','x'),direction=data.get('entry_direction','positive'),
                     frame_id=frame_id,received_at=received_at,capture_age_ms=data.get('capture_age_ms'))
             if tracking.get('newly_moved'):shared.attendance_changed()
-        return jsonify(**recognition, box=box, threshold=MATCH_THRESHOLD, attendance=tracking,
+        return jsonify(**recognition, box=box, landmarks=analysis.get("landmarks", []), quality=analysis.get("quality", {}), threshold=MATCH_THRESHOLD, attendance=tracking,
                        processing_ms=round((time.perf_counter()-processing_started)*1000,1))
 
     def identify_group(image, detector, for_attendance):
@@ -530,7 +537,8 @@ def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmat
             if face['status'] == 'matched' and counts[face['person']['id']] > 1:
                 face['status'] = 'ambiguous'
                 face['message'] = 'Multiple faces match the same enrollment. No attendance marked for those faces.'
-        return {**result, 'faces': faces}, frame_fingerprint(frame) if for_attendance else None
+        needs_evidence = for_attendance and any(face['status'] == 'matched' for face in faces)
+        return {**result, 'faces': faces}, frame_fingerprint(frame) if needs_evidence else None
 
     @app.post('/api/recognize/group')
     def recognize_group():
@@ -623,7 +631,7 @@ def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmat
         if selected is not None and (len(selected) > 18 or not selected.isascii() or not selected.isdecimal() or int(selected) < 1):
             raise FaceError('invalid_session', 'Choose a valid attendance session.')
         with store.lock:
-            sessions = attendance.sessions()
+            sessions = attendance.sessions(include_counts=request.args.get('history') != 'compact')
             session_id = int(selected) if selected is not None else next((s['id'] for s in sessions if s['status']=='active'), sessions[0]['id'] if sessions else None)
             detail = attendance.detail(session_id) if session_id is not None else None
         return jsonify(sessions=sessions, session=detail)
@@ -671,5 +679,5 @@ def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmat
 
 
 if __name__ == "__main__":
-    create_app(fast_confirmation=os.environ.get("IDENTIQ_DEV_FAST_CONFIRMATION") == "1").run(
+    create_app(fast_confirmation=os.environ.get("IDENTIQ_DEV_FAST_CONFIRMATION", "1") == "1").run(
         host="127.0.0.1", port=int(os.environ.get("PORT", "8080")), debug=False, threaded=True)
