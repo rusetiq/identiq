@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+export IDENTIQ_RAPID_CAPTURE="${IDENTIQ_RAPID_CAPTURE:-1}"
 cd "$(dirname "$0")"
 if [ ! -x .venv/bin/python ]; then
   echo "Run ./run.sh once to install the app dependencies."

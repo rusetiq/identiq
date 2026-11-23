@@ -15,12 +15,16 @@ from attendance_policy import (MATCH_THRESHOLD, MATCH_MARGIN, CONFIRMATIONS,
 
 
 class Attendance:
-    def __init__(self, store, clock=time.monotonic, *, fast_confirmation=True):
+    def __init__(self, store, clock=time.monotonic, *, fast_confirmation=True, rapid_capture=False):
         self.store = store
         self.clock = clock
         self.min_interval = .19 if fast_confirmation else MIN_INTERVAL
         self.min_duration = .40 if fast_confirmation else MIN_DURATION
         self.capture_interval_ms = 205 if fast_confirmation else 300
+        if rapid_capture and fast_confirmation:
+            self.min_interval = .014
+            self.min_duration = .030
+            self.capture_interval_ms = 17
         self.sightings = {}
         self.crossings = {}
         self.frames = {}
@@ -233,7 +237,7 @@ class Attendance:
         if evidence['count'] >= CONFIRMATIONS-1:
             delay = max(delay, self.min_duration - (now-evidence['started']))
         # One millisecond avoids scheduling exactly on a floating-point boundary.
-        return max(40, math.ceil(delay*1000)+1)
+        return max(min(40, self.capture_interval_ms), math.ceil(delay*1000)+1)
 
     @staticmethod
     def clear_evidence(recognition):

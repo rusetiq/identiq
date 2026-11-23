@@ -14,7 +14,7 @@ window.IdentiqScan = (() => {
       // These hints are relative to the frame's capture time. Encoding,
       // transport and inference have already used part of that interval.
       const nextCapture = Math.min(...confirming.map(update => update.retry_after_ms));
-      return Math.max(0, Math.min(1000, Math.ceil(nextCapture + 10 - frameElapsedMs)));
+      return Math.max(0, Math.min(1000, Math.ceil(nextCapture + (nextCapture < 40 ? 0 : 10) - frameElapsedMs)));
     }
     const hint = data.retry_after_ms;
     // The next inference also consumes time before the server can count it.

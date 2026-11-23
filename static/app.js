@@ -208,7 +208,7 @@ async function startCamera(switchTo) {
     const preferred = state.cameraFacing || (state.mode === "attendance" ? "environment" : "user");
     const openCamera = facingMode => navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } }
+      video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: state.attendanceCaptureIntervalMs === 17 ? 60 : 30 } }
     });
     let stream;
     let requested = switchTo || preferred;
@@ -400,11 +400,15 @@ async function scan(attendanceSessionId = null, sharedExecution = false) {
     return {image, capturedAt, maxSide};
   };
   let bufferEncoding = false;
+  let lastVideoTime = -1;
   const captureIntervalMs = state.attendanceCaptureIntervalMs || 205;
   const bufferTimer = attendanceSessionId ? setInterval(async () => {
     if (bufferEncoding || !state.scanning || generation !== state.generation || !state.stream || connectionIssues.has('api')) return;
     const now = performance.now();
-    if (now - lastCapturedAt < captureIntervalMs - 15) return;
+    if (now - lastCapturedAt < captureIntervalMs - Math.min(15, captureIntervalMs / 4)) return;
+    const videoTime = $("video").currentTime;
+    if (Number.isFinite(videoTime) && videoTime === lastVideoTime) return;
+    lastVideoTime = videoTime;
     try {
       const captured = captureFresh();
       pendingFrames.push(captured);

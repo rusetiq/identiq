@@ -58,7 +58,8 @@ def create_app(database=None, engine=None, allowed_hosts=None, *, fast_confirmat
     app.config["MAX_CONTENT_LENGTH"] = 128 * 1024 * 1024
     token = secrets.token_urlsafe(32)
     store = Store(database or ROOT / "data" / "identities.sqlite3")
-    attendance = Attendance(store, fast_confirmation=fast_confirmation)
+    attendance = Attendance(store, fast_confirmation=fast_confirmation,
+                            rapid_capture=os.environ.get("IDENTIQ_RAPID_CAPTURE") == "1")
     shared = SharedCamera(attendance)
     cloud = CloudSync(store, attendance, shared.attendance_changed)
     app.extensions['cloud_sync'] = cloud

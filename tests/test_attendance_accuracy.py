@@ -360,3 +360,16 @@ def test_default_scanner_keeps_three_distinct_matches_and_enforces_400ms(setup, 
     assert observe(scanner, 1, 'a')['confirmations'] == 1
     assert observe(scanner, 1.001, 'b')['confirmations'] == 2
     assert observe(scanner, 1.202, 'c')['newly_present']
+
+
+def test_rapid_capture_needs_three_distinct_frames_and_thirty_ms(setup, image):
+    client, _, engine, sid, moment, scanner = prepare(setup, image)
+    store = client.application.extensions['attendance'].store
+    attendance = Attendance(store, clock=lambda: moment[0], rapid_capture=True)
+    face = {**response_faces([engine.vector])['faces'][0], 'status': 'matched',
+            'person': store.people()[0], 'similarity': .9, 'candidate_count': 1}
+    for elapsed, key, saved in [(0, 'a', False), (.015, 'b', False),
+                                (.031, 'b', False), (.032, 'c', True)]:
+        moment[0] = 100 + elapsed
+        update = attendance.observe(sid, scanner, face, frame_id=key * 64)
+        assert update['newly_moved'] is saved
