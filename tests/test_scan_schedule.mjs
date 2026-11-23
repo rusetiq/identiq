@@ -193,3 +193,14 @@ test('a distant or blurred walk-by and its provisional match request full-detail
   settings.observe({faces:[],code:'no_face'},video);
   assert.equal(settings.jpegQuality(),.78);
 });
+
+test('a sharp large provisional face can confirm at compact resolution',()=>{
+  const size=scheduling().captureSize(), video={videoWidth:1920,videoHeight:1080};
+  size.next(0);
+  const face={status:'matched',box:[0,0,.5,.6],similarity:.85,
+    attendance:{status:'confirming'},quality:{brightness:100,detection_score:.98,sharpness:48}};
+  size.observe({faces:[face]},video);
+  assert.equal(size.next(100),640);
+  size.observe({faces:[{...face,similarity:.72}]},video);
+  assert.equal(size.next(110),1920);
+});

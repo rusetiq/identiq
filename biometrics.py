@@ -335,7 +335,10 @@ class FaceEngine:
         return self._quality(image, faces[0], attendance=attendance)
 
     def _group(self, image, extract=False, attendance=False):
-        detected = self._detect(image,max_side=960,far=True)
+        # On smaller attendance frames a 96px face still spans at least
+        # 64 detector pixels. Quality checks and embeddings use the original.
+        search_side = min(960, max(512, (2 * max(image.shape[:2])) // 3)) if attendance else 960
+        detected = self._detect(image, max_side=search_side, far=True)
         if len(detected) > MAX_FACES:
             return {"status": "adjust", "code": "too_many_faces", "face_count": len(detected), "faces": [],
                     "message": f"Up to {MAX_FACES} faces can be scanned together. Split into smaller groups."}

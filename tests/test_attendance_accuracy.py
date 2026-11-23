@@ -373,3 +373,21 @@ def test_rapid_capture_needs_three_distinct_frames_and_thirty_ms(setup, image):
         moment[0] = 100 + elapsed
         update = attendance.observe(sid, scanner, face, frame_id=key * 64)
         assert update['newly_moved'] is saved
+
+
+@pytest.mark.parametrize('action,margin,score,sharpness,saved', [
+    ('check_in', .32, .96, 40, True), ('check_in', .19, .96, 40, False),
+    ('check_in', .32, .85, 40, False), ('check_in', .32, .96, 18, False),
+    ('automatic', .32, .96, 40, False), ('check_out', .32, .96, 40, False),
+])
+def test_rapid_first_frame_write(setup, image, action, margin, score, sharpness, saved):
+    client, _, engine, sid, moment, scanner = prepare(setup, image)
+    store = client.application.extensions['attendance'].store
+    attendance = Attendance(store, clock=lambda: moment[0], rapid_capture=True)
+    face = response_faces([engine.vector])['faces'][0]
+    face.update(status='matched', person=store.people()[0], similarity=.95,
+                candidate_count=2, match_margin=margin)
+    face['quality'].update(detection_score=score, sharpness=sharpness)
+    result = attendance.observe(sid, scanner, face, action, frame_id='a'*64)
+    assert result['newly_moved'] is saved
+    assert len(attendance.detail(sid)['movements']) == int(saved)

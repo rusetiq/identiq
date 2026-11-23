@@ -130,7 +130,7 @@ function updateControls() {
   $("attendance-flow").disabled = $("fullscreen-flow").disabled = state.enrolling || state.attendanceBusy;
   $("fullscreen-flow").value = $("attendance-flow").value = state.movementMode;
   $("direction-settings").hidden = state.movementMode !== "automatic";
-  $("movement-instructions").textContent = state.movementMode === "automatic" ? "Keep your face clear while crossing the line. Movement requires a confirmed identity and a clear crossing." : state.movementMode === "check_out" ? "Exit camera mode: confirm your face across fresh frames to check out after a recorded arrival." : "Entry camera mode: hold still for confirmation across fresh frames before check-in.";
+  $("movement-instructions").textContent = state.movementMode === "automatic" ? "Keep your face clear while crossing the line. Movement requires a confirmed identity and a clear crossing." : state.movementMode === "check_out" ? "Exit camera mode: confirm your face across fresh frames to check out after a recorded arrival." : "Entry camera mode: a clear, high-confidence match can check you in immediately. Hold still if more frames are needed.";
   document.querySelectorAll('#attendance-roster button').forEach(button => button.disabled = state.attendanceBusy || button.dataset.unavailable === 'true');
   $("delete-attendance").disabled = state.attendanceBusy || state.enrolling || !state.attendanceSessionCount;
   $("fullscreen-scan").hidden = state.mode !== "attendance" || !state.activeAttendance;

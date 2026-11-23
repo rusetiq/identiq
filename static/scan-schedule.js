@@ -99,7 +99,7 @@ window.IdentiqScan = (() => {
       observe(result, video, submittedSize, frameCount = 1) {
         size = 1920;
         const faces = result.faces || [result];
-        needsDetail = faces.some(face => face.attendance?.status === 'confirming' ||
+        needsDetail = faces.some(face => (face.attendance?.status === 'confirming' && !(face.quality?.sharpness >= 24 && face.similarity >= .8)) ||
           ['too_small', 'blurry', 'low_light', 'uncertain_detection'].includes(face.code));
         if (needsDetail) return;
         if (submittedSize === 1920 && Number.isFinite(result.processing_ms))

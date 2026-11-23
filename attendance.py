@@ -21,7 +21,8 @@ class Attendance:
         self.min_interval = .19 if fast_confirmation else MIN_INTERVAL
         self.min_duration = .40 if fast_confirmation else MIN_DURATION
         self.capture_interval_ms = 205 if fast_confirmation else 300
-        if rapid_capture and fast_confirmation:
+        self.rapid_capture = rapid_capture and fast_confirmation
+        if self.rapid_capture:
             self.min_interval = .014
             self.min_duration = .030
             self.capture_interval_ms = 17
@@ -376,7 +377,12 @@ class Attendance:
         if len(self.sightings) >= 256 and key not in self.sightings:
             self.sightings.pop(next(iter(self.sightings)))
         self.sightings[key] = evidence
-        if evidence['count'] < CONFIRMATIONS or now-evidence['started'] < self.min_duration:
+        single_check_in = (self.rapid_capture and action == 'check_in'
+                           and recognition['similarity'] >= .92
+                           and (recognition['candidate_count'] == 1 or recognition['match_margin'] >= .25)
+                           and recognition['quality']['detection_score'] >= .90
+                           and recognition['quality']['sharpness'] >= 24)
+        if not single_check_in and (evidence['count'] < CONFIRMATIONS or now-evidence['started'] < self.min_duration):
             return self.outcome('confirming', evidence['count'], attendance_status=row['status'], message='Confirming the same identity across fresh, clear camera frames.',
                                 retry_after_ms=self.confirmation_delay(evidence,now))
         evidence['confirmed'] = True
@@ -385,8 +391,10 @@ class Attendance:
             return self.outcome('tracking', evidence['count'], campus_state=row['campus_state'], message='Waiting for a clear crossing of the line.')
         evidence['movement'] = None
         note = f"Camera confirmed across {CONFIRMATIONS} fresh frames; minimum similarity {evidence['min_similarity']:.4f}."
+        if single_check_in:
+            note = f"Camera check-in confirmed by a high-confidence frame; similarity {recognition['similarity']:.4f}."
         result = self.apply_movement(db, row, movement, 'automatic' if action == 'automatic' else 'camera', note)
-        return {**self.outcome(result['status'], evidence['count']), **result, 'record_id':row['id']}
+        return {**self.outcome(result['status'], evidence['count']), **result, 'required_confirmations':1 if single_check_in else CONFIRMATIONS, 'record_id':row['id']}
 
     def finish(self, session_id):
         with self.store.lock, self.store.connect() as db:
