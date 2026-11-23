@@ -4,7 +4,9 @@ A local laptop-camera attendance and face recognition app. Register students and
 
 ## Start
 
-From this folder:
+On Windows x64, extract the project ZIP or clone it, then double-click **Start Identiq.bat**. The first launch uses WinGet to install Python 3.13 if needed, sets up dependencies and downloads the models. Keep the console open while using the app at **http://localhost:8080**.
+
+On macOS or Linux, from this folder:
 
 ```sh
 ./run.sh
